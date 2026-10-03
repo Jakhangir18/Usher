@@ -1,0 +1,30 @@
+# Install on the Pi into a venv that can see the system packages (gpiozero/lgpio come from Pi OS):
+#   python3 -m venv --system-site-packages .venv && source .venv/bin/activate && pip install -r requirements.txt
+# System packages: sudo apt install -y libportaudio2 python3-lgpio
+
+# --- Core server (server.py) ---
+sounddevice
+numpy
+websockets
+
+# --- HTTP + static HUD (Flask app: /state) ---
+flask
+Flask-CORS
+
+# --- Speech pipeline ---
+# >=1.0 for temperature/max_new_tokens/without_timestamps in transcribe().
+faster-whisper>=1.0
+jellyfish
+# torch is optional: only needed if USE_SILERO_VAD=1 (off by default).
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+# --- Temple motors (haptics.py, Raspberry Pi only) ---
+gpiozero
+
+# --- Direction over USB (doa_reader.py; falls back to the xvf_host binary without it) ---
+pyusb
+
+# --- OLED display (display_cue.py, Raspberry Pi only) ---
+adafruit-circuitpython-ssd1306
+adafruit-blinka
+Pillow

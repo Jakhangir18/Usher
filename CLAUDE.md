@@ -1,0 +1,205 @@
+# Usher Syndrome Haptic Headset ("Hello Jax")
+
+## What we're building
+A headset for people with Usher syndrome (hearing loss + progressive tunnel vision).
+When someone says "Hello Jax", a 360° mic array finds the direction of the voice and
+two vibration motors on the temples buzz to guide the wearer to turn toward the speaker.
+Team of 4, hackathon build. Repo: https://github.com/Jakhangir18/Usher
+`.env` is gitignored. Never commit API keys (ElevenLabs etc.).
+
+## Hardware
+- Raspberry Pi 5 (runs everything). gpiozero needs lgpio: `GPIOZERO_PIN_FACTORY=lgpio`, venv with `--system-site-packages`.
+- reSpeaker XVF3800 USB 4-mic array (DOA via vendor `xvf_host` tool, needs sudo). ALSA card 2, **6 channels**.
+  Never record it as 1 channel (averages all 6 → echoey). Tested 2026-10-03: ch0 = processed beam, auto-gain,
+  clipped (−21 dBFS avg, 142 clipped samples in 5 s); ch2 = single raw mic, clean, −27 dBFS. Using ch2 for now
+  (`AUDIO_INPUT_CHANNELS=6`, `AUDIO_CHANNEL=2`); retry ch0 with lower AGC gain if the hall is noisy.
+- 2 motors on the temples (left = GPIO4 / pin 7 / "P1", right = GPIO5 / pin 29 / "P2", BCM numbering), wired like Quackhack/Touchpoint;
+  micro vibration motors (red/blue leads),
+  each switched by a MOSFET trigger module as in Touchpoint's schematic (motor between VCC and the module, Pi pin → module signal).
+- **Keep motor power very low, the motors are fragile.** `LEVEL` 0.15, `KICK_LEVEL` 0.30 in `haptics.py`.
+  Raise in 0.05 steps only if needed (KICK_LEVEL first if it won't spin). Power motors from 3.3 V, not 5 V, if they're ~3 V rated.
+- No IMU. Guidance is open-loop. If one is added later, BNO055 is preferred (on-chip fusion, gives heading directly).
+
+## Code base
+Built on two of a teammate's prior hackathon repos:
+- SPOOT: https://github.com/Jakhangir18/BeaverHacks-2026
+  Its `server.py` gave us: continuous DOA polling, audio ring buffer, faster-whisper STT, fuzzy/phonetic name
+  matching via `USER_NAME`, local fallback when no Gemini key (its Silero VAD is now off by default, see below).
+- Touchpoint: https://github.com/Jakhangir18/Quackhack3.0
+  `output/motors.py` = gpiozero PWM motor control with kick-start. Pattern reused in `haptics.py`.
+
+## Our additions
+- `haptics.py` (in this repo): two-motor turn guidance, open-loop.
+  - `guide(rel_angle)` is non-blocking; a new call cancels the old pattern immediately. `stop()` cancels and turns both motors off.
+  - Angle convention matches SPOOT: 0 = front, 90 = right, 270 = left.
+  - Discrete pulse counts (easier to read on the temples than intensity changes), played twice (~1.7 s max):
+    - in front (±15°): 1 pulse, both temples
+    - <60°: 1 pulse on that side
+    - <120°: 2 pulses
+    - behind: 3 pulses
+  - Single fixed very low intensity `LEVEL` (0.15) with a short `KICK_LEVEL` (0.30) start-up boost, adjustable at the top of the file.
+  - Dead behind (exactly 180°) counts as left.
+  - If GPIO can't be opened (dev laptop, missing lgpio) it falls back to dummy motors with a warning, so `server.py` still runs.
+  - Bench test: `python haptics.py`
+
+## Changes made to SPOOT's `server.py` (copied into this repo; SPOOT's phone files, `oled_hud.py` and `oled_sanity_check.py` left out: `display_cue.py` replaces them)
+1. **Rolling wake window replaced SPOOT's trigger + capture.** `wake_loop()`: every `WAKE_HOP_SEC` (1 s, or when
+   Whisper finishes if slower) transcribe the last `WAKE_WINDOW_SEC` (4 s) of audio, if any 0.1 s of it reaches
+   `VOLUME_THRESHOLD`. Why: the old loudness trigger + capture window cut "Hello Jax" off before "Jax" finished
+   (the quiet "x" ended the capture), and one slow Whisper job (3 s+ on the Pi) blocked everything said meanwhile.
+   Now each phrase lands whole in some window and nothing is lost while busy. Removed: `poll_mic`, `enrich_event`,
+   `capture_phrase`, PREBUFFER/POSTBUFFER/ENRICH_COOLDOWN settings.
+2. **Rule: the motors/display only trigger on the wake phrase "Hello Jax" or a variation, never on the name alone.**
+   A variation = a greeting (`WAKE_GREETINGS`, default hello/helo/hallo/hullo/hi/hey/hiya) followed within
+   `WAKE_MAX_GAP` (1) words by the name, an alias, or a `WAKE_EXTRA_NAMES` spelling (default "jack", Whisper's
+   likeliest; safe only because a greeting is required). Exact word or same Metaphone code; apostrophes stripped
+   ("Jack's" → "jacks"). Soundex/fuzzy are too loose for "Jax". `WAKE_COOLDOWN_SEC` (4.5) > window so one phrase
+   isn't announced twice. Wake check runs before transcript dedupe. No "Hello/Hey Jax" in Whisper's prompt.
+3. Direction (`doa_reader.py`, approach from sajjad's `usher-audio` branch): reads `DOA_VALUE` = angle + the chip's own
+   speech flag over USB with pyusb (`DOA_SOURCE=auto`, falls back to the `xvf_host` binary's `AEC_AZIMUTH_VALUES`).
+   Only readings taken during speech go into `_doa_history`; a wake uses their circular mean over the loud parts of the
+   window. Polled every `DOA_POLL_SEC` (0.05 s; USB reads are cheap, no more `sudo` process per reading).
+   **Not yet tested on the Pi**, and needs recalibrating: the 181° offset was measured with the xvf_host source.
+4. Mic: `AUDIO_INPUT_CHANNELS`/`AUDIO_CHANNEL` (open 6, keep one; validated at startup), stream status printed.
+5. `VOLUME_THRESHOLD` env + "listening… peak=" heartbeat every 3 s while quiet (shows level and that the stream is alive).
+6. Speech filtering: `USE_SILERO_VAD=0` + `WHISPER_VAD_FILTER=1` (Whisper's built-in VAD, no torch). With the rolling
+   window, Silero + Whisper stalled the loop on the Pi (first window 17.6 s, then froze). Silero, if re-enabled, is
+   limited to 1 torch thread. Start-up warm-up runs one window through Whisper (first call was ~17 s cold).
+   Each window logs `timing: silero …, whisper …`. If the server freezes: `pkill -USR1 -f server.py` from another
+   terminal prints every thread's stack (faulthandler).
+   Gemini is skipped with no key and never blocks the wake loop; window errors print a traceback.
+7. Whisper decodes once (`temperature=0.0`, no previous-text conditioning, no timestamps, `max_new_tokens=60`).
+   Before this, repetitive windows ("hello jacks, hello jacks, ...") took 10–36 s because of Whisper's default
+   temperature-fallback re-decoding. After: tested 2026-10-03, wake → display arrow works from front/left/right,
+   0.8–1.6 s per window, no stalls, ~1–2 s from phrase to arrow. Whisper hears "Jax" as "jacks" (accepted).
+8. `XVF_HOST` (default `~/Documents/reSpeaker_XVF3800_USB_4MIC_ARRAY/host_control/rpi_64bit/xvf_host`) and
+   `DOA_OFFSET_DEG` configurable; `.env` loaded from next to `server.py`. Code defaults match the tested setup
+   (beam 1, Silero off, threshold 0.015, offset 181) except the mic channels, which need `.env` (laptop-safe defaults).
+   Audio stream opened with `latency='high'` (one startup "input overflow" seen before). Wake cooldown is measured
+   from the window's capture time so Whisper jitter can't cause a double announcement.
+
+Current focus: "Hello Jax" → display arrow (motors detached for now). Phone/PWA is out of scope: Flask still runs
+(`/state` works), but `index.html`/`manifest.json` aren't in this repo, so `/` and `/manifest.json` return 404.
+
+## Setup on the Pi (from scratch)
+1. `sudo apt install -y libportaudio2 python3-lgpio i2c-tools sox` and enable I2C: `sudo raspi-config nonint do_i2c 0`.
+2. Mic tool: `cd ~/Documents && git clone https://github.com/respeaker/reSpeaker_XVF3800_USB_4MIC_ARRAY.git`, then
+   `chmod +x ~/Documents/reSpeaker_XVF3800_USB_4MIC_ARRAY/host_control/rpi_64bit/xvf_host`.
+   `server.py` runs `sudo xvf_host` several times a second, so sudo must not ask for a password (Pi OS default user is fine).
+3. Code: clone this repo, then `python3 -m venv --system-site-packages .venv && source .venv/bin/activate && pip install -r requirements.txt`
+   (`--system-site-packages` so gpiozero/lgpio from Pi OS are visible).
+4. `cp .env.example .env`, then add any keys. After that, edit `.env` with nano; don't copy over it again (it holds keys).
+5. USB access to the mic for direction (no sudo): add a udev rule, then unplug/replug the mic:
+   `echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="2886", ATTR{idProduct}=="001a", MODE="0666"' | sudo tee /etc/udev/rules.d/99-respeaker.rules && sudo udevadm control --reload-rules && sudo udevadm trigger`
+6. Bench tests: `i2cdetect -y 1` (display shows `3c`), `python display_cue.py`, `python motor_test.py left|right`, `python haptics.py`.
+7. With the mic mounted: `python doa_calibrate.py` (in the venv), put its `DOA_FLIP_LEFT_RIGHT` / `DOA_OFFSET_DEG` in `.env`.
+   Redo after changing `DOA_SOURCE` or remounting the mic.
+8. Run: `python server.py`. First start downloads the Whisper model (~75 MB; the HF_TOKEN warning is harmless).
+   Check the startup line `DOA source = usb DOA_VALUE ...`; if it says xvf_host, the udev rule (step 5) isn't active.
+
+## Display
+`display_cue.py`: on "Hello Jax", `server.py` also shows the turn direction on the OLED (yellow band "HELLO JAX 270°",
+blue area arrow + LEFT/RIGHT/FRONT/BEHIND, same thresholds as `haptics.py`, clears after 4 s). Lets the wake test run with
+motors detached. Bench test: `python display_cue.py` (also the display wiring test).
+
+128×64 SSD1306, two-colour: fixed yellow band at the top (~16 px), blue below. Colours are fixed in the glass,
+so we can't colour-code people; speakers are shown by name/letter + direction arrow instead.
+I2C on GPIO2/3 (pins 3/5, no clash with motor pins), address 0x3C. The caption layout below goes in `display_cue.py`
+(or a sibling module); only one program may drive the display at a time.
+
+Planned layout:
+```
+┌────────────────────────┐
+│ ◀ SAM                  │  yellow: who is speaking + direction arrow
+├────────────────────────┤
+│ did you bring the      │  blue: what they're saying
+│ motors? I left them    │  (~3 lines × ~21 chars)
+│ by the door            │
+└────────────────────────┘
+```
+
+## Speaker tagging plan
+| Layer | Figures out | How |
+|---|---|---|
+| Voice fingerprint (on Pi) | same person as before | speaker embedding per clip (Resemblyzer / SpeechBrain ECAPA), matched across clips |
+| Direction (mic array) | where they are | DOA angle; tie-breaker when voices sound alike |
+| ElevenLabs Scribe | transcript + who spoke when within a clip | cloud STT with diarization (labels reset per request, hence the fingerprints) |
+| Gemini | names and context ("A is Sam", who's talking to Jax, topic) | reads the recent labelled transcript every ~20–30 s |
+
+Unknown speakers are shown as question marks, one more per new unknown person: first `?`, second `??`, third `???`, ...
+(e.g. `◀ ??`). When Gemini learns a name ("Hi, I'm Sam"), that person's marks become `SAM` everywhere, including history.
+Counting marks gets hard past ~4, so the 5th unknown onwards could fall back to `?5`, `?6` (decide when testing).
+
+LLM: keep Gemini (already in SPOOT, and counts for the MLH Gemini track). Gemini can only name people who get
+named in conversation. It never sits in the buzz path.
+
+## Later
+- Companion app / front end (not now).
+
+## .env
+Copy `.env.example` to `.env` (the Pi's `.env` also holds the ElevenLabs key, so edit it with nano rather than
+overwriting it). Put "jack" in `WAKE_EXTRA_NAMES`, not `USER_NAME_ALIASES` (aliases also drive name-only matching).
+Leave `GEMINI_API_KEY` empty for now. Gemini is too slow for the core turn loop and local name detection is enough.
+
+## Known issues / to check
+- Latency: Whisper tiny.en takes ~0.8–1.6 s per window on the Pi 5 (faster-whisper pads to 30 s). Watch the
+  "(whisper N.NNs)" log. If wake detection is still unreliable/slow: Porcupine custom keyword (needs a Picovoice
+  account) or Vosk with a restricted grammar (offline, no account), keeping Whisper for captions.
+- Teammate's `origin/usher-audio` branch (sajjad): its DOA_VALUE + speech-flag idea is now in `doa_reader.py`. Its
+  `Calibration` applies the offset BEFORE the flip, so its offset numbers can't be copied into `DOA_OFFSET_DEG`.
+  Don't run its scripts alongside `server.py` (both use the mic's USB control interface).
+- Mic orientation: `DOA_FLIP_LEFT_RIGHT` (default ON) + `DOA_OFFSET_DEG` (rotation, added to server.py).
+  Measure both with `python3 doa_calibrate.py` once the mic is mounted on the headset; redo if it's remounted.
+  **Mounting: the wearer's front = the side of the mic board away from the USB plug.**
+  Calibrated 2026-10-03: `DOA_FLIP_LEFT_RIGHT=1`, `DOA_OFFSET_DEG=181`, residual error 1–11°.
+  (A first run gave flip=0/offset 179 because left and right were swapped during it; confirmed and fixed in the
+  second run. Always use the WEARER's left/right.)
+- The vendor `xvf_host` binary has no `DOA_VALUE` command (only the Python tool does); use `AEC_AZIMUTH_VALUES`,
+  last value = auto-selected beam. Single readings jump between beams; average over the utterance.
+- BCM4 is the default 1-wire pin: make sure `dtoverlay=w1-gpio` is off.
+- Touchpoint's key/button circuit pulls up to VCC through the button with 100 Ω to GND: if that VCC is 5 V it can damage Pi GPIO (3.3 V only). Not used here; check before reusing.
+- Mount the mic array rigidly to the headset so its 0° = the wearer's forward.
+- Touchpoint's pin comments for dots 5/6 don't match its code. Check before reusing those pins.
+- Drive motors through transistors or a driver (e.g. DRV2605L), not raw GPIO current.
+- Temples are sensitive: keep default intensity low and adjustable.
+- Test DOA in a noisy hall, not just a quiet room (echoes, false name triggers).
+
+## ElevenLabs plan (sponsor track)
+Core idea: "Catch me up". People with Usher syndrome often miss the start of a conversation.
+1. Scribe (STT) transcribes continuously; each line is tagged with a speaker label and the DOA angle.
+2. "Hello Jax" → buzz → wearer turns.
+3. Micro display shows what that speaker said in the last ~30 s, then live captions.
+4. Later: wearer replies by typing/tapping; ElevenLabs TTS speaks it (chosen voice or their own cloned voice). Needs an input device.
+
+Additions:
+- Sound awareness: map Scribe's audio event tags (laughter, applause, ...) to a distinct haptic pattern. Not a safety feature, don't pitch it as alarm detection.
+- Voice Isolator on noisy-hall audio before Scribe, if the added latency is acceptable.
+- Name learning: when someone says "Hi, I'm Sam", an LLM links the name to that speaker label + direction, so captions read "Sam (on your right)".
+
+Telling speakers apart: DOA angle first (free, local, instant), Scribe diarization second, LLM last
+(names, summaries, off the critical path). Keep the "Hello Jax" → buzz loop local and independent of all of this.
+
+To check: whether Scribe realtime supports diarization or only batch does. If only batch, use DOA alone for
+live captions and run batch Scribe on the last 30 s when the catch-up is requested. Need word-level timestamps either way to align words with DOA.
+
+Privacy: this streams other people's speech to the cloud. Have an answer ready for judges (consent, what's stored).
+
+## Tracks (MHacks 2026)
+One main track, unlimited sponsor tracks.
+- Main track: **Beyond the Code (Hardware)** (decided). Grand Prize is judged across everything.
+- Sponsor tracks, worth entering:
+  - Best Project Built with ElevenLabs + [MLH] Best Use of ElevenLabs (needs Scribe actually in the build)
+  - [MLH] Best Use of Gemini (SPOOT already supports it via `GEMINI_API_KEY`; needs it switched on and shown)
+  - Notability (use it for brainstorming/wiring diagrams, 2+ screenshots + a note on Devpost)
+  - [MLH] Best .Tech Domain Name (register a free .tech domain for the project page)
+  - Best Design (Figma), if someone mocks up the display UI / headset in Figma
+- Skipped (poor fit or big extra work): FinchNode, Fetch.ai, Photon, Neon, FREE-WILi, Relay, SpaceXAI (needs Cursor + space data), Spacetime, Nessie, Solana, Tiger Data, Presage.
+
+## Stretch goals
+- Mic-only closed loop: the mic is head-mounted, so DOA is already head-relative. If the speaker keeps talking, re-read DOA and re-call `guide()` until they're in front.
+- IMU closed-loop guidance (covers the case where the speaker goes quiet)
+- Speaker embeddings to keep tracking the same voice
+
+## Design principles
+- Co-design with Usher/DeafBlind users. Haptics over visuals, since remaining central vision is precious.
+- Keep it simple. Avoid unnecessary abstractions.
