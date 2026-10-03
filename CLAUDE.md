@@ -59,7 +59,8 @@ Built on two of a teammate's prior hackathon repos:
    speech flag over USB with pyusb (`DOA_SOURCE=auto`, falls back to the `xvf_host` binary's `AEC_AZIMUTH_VALUES`).
    Only readings taken during speech go into `_doa_history`; a wake uses their circular mean over the loud parts of the
    window. Polled every `DOA_POLL_SEC` (0.05 s; USB reads are cheap, no more `sudo` process per reading).
-   **Not yet tested on the Pi**, and needs recalibrating: the 181° offset was measured with the xvf_host source.
+   USB source tested 2026-10-03: ~20 speech readings/s, calibration flip=1 / offset 184°, residual error 3–11°
+   (the xvf_host source gave 181°, so both agree on "front").
 4. Mic: `AUDIO_INPUT_CHANNELS`/`AUDIO_CHANNEL` (open 6, keep one; validated at startup), stream status printed.
 5. `VOLUME_THRESHOLD` env + "listening… peak=" heartbeat every 3 s while quiet (shows level and that the stream is alive).
 6. Speech filtering: `USE_SILERO_VAD=0` + `WHISPER_VAD_FILTER=1` (Whisper's built-in VAD, no torch). With the rolling
@@ -74,7 +75,7 @@ Built on two of a teammate's prior hackathon repos:
    0.8–1.6 s per window, no stalls, ~1–2 s from phrase to arrow. Whisper hears "Jax" as "jacks" (accepted).
 8. `XVF_HOST` (default `~/Documents/reSpeaker_XVF3800_USB_4MIC_ARRAY/host_control/rpi_64bit/xvf_host`) and
    `DOA_OFFSET_DEG` configurable; `.env` loaded from next to `server.py`. Code defaults match the tested setup
-   (beam 1, Silero off, threshold 0.015, offset 181) except the mic channels, which need `.env` (laptop-safe defaults).
+   (beam 1, Silero off, threshold 0.015, offset 184) except the mic channels, which need `.env` (laptop-safe defaults).
    Audio stream opened with `latency='high'` (one startup "input overflow" seen before). Wake cooldown is measured
    from the window's capture time so Whisper jitter can't cause a double announcement.
 
@@ -151,7 +152,7 @@ Leave `GEMINI_API_KEY` empty for now. Gemini is too slow for the core turn loop 
 - Mic orientation: `DOA_FLIP_LEFT_RIGHT` (default ON) + `DOA_OFFSET_DEG` (rotation, added to server.py).
   Measure both with `python3 doa_calibrate.py` once the mic is mounted on the headset; redo if it's remounted.
   **Mounting: the wearer's front = the side of the mic board away from the USB plug.**
-  Calibrated 2026-10-03: `DOA_FLIP_LEFT_RIGHT=1`, `DOA_OFFSET_DEG=181`, residual error 1–11°.
+  Calibrated 2026-10-03: `DOA_FLIP_LEFT_RIGHT=1`, `DOA_OFFSET_DEG=184` with the USB source (181 with xvf_host).
   (A first run gave flip=0/offset 179 because left and right were swapped during it; confirmed and fixed in the
   second run. Always use the WEARER's left/right.)
 - The vendor `xvf_host` binary has no `DOA_VALUE` command (only the Python tool does); use `AEC_AZIMUTH_VALUES`,

@@ -92,7 +92,7 @@ DOA_FLIP_LEFT_RIGHT = os.environ.get("DOA_FLIP_LEFT_RIGHT", "1").strip().lower()
 
 # Rotation between the mic's 0 deg and the wearer's front, applied after the flip.
 # Measure both with `python3 doa_calibrate.py`.
-DOA_OFFSET_DEG = float(os.environ.get("DOA_OFFSET_DEG", "181"))  # calibrated 2026-10-03
+DOA_OFFSET_DEG = float(os.environ.get("DOA_OFFSET_DEG", "184"))  # calibrated 2026-10-03, USB source
 
 
 def _logical_azimuth_from_hardware_deg(raw_deg):
