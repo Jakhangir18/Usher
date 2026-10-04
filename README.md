@@ -11,7 +11,7 @@ reSpeaker XVF3800 mic array ──► direction (DOA + on-chip speech flag, aver
    │
    ├─ ch2 ──► rolling 4 s window ──► Whisper (tiny.en, on the Pi) ──► "hello" + "Jax"?
    │                                                                     │
-   │                          temple motors (pulse count = how far to turn) ◄─┤
+   │                          temple motors (soft buzz toward them, fades as you face them) ◄─┤
    │                          OLED arrow (LEFT / RIGHT / FRONT / BEHIND)     ◄─┤
    │                          catch-up: last 30 s → ElevenLabs Scribe (voice ID) → what the caller said
    │
@@ -24,7 +24,7 @@ motors) runs entirely on the Pi and works offline; captions and catch-up need in
 - Raspberry Pi 5
 - Seeed reSpeaker XVF3800 USB 4-mic array
 - 128×64 SSD1306 OLED (I2C, yellow/blue)
-- 2 micro vibration motors via MOSFET modules on GPIO4 (left) and GPIO5 (right), power 0.35 (0.5 is too strong).
+- 2 micro vibration motors via MOSFET modules on GPIO4 (left) and GPIO5 (right), soft continuous buzz (0.10–0.20).
 
 ## Setup and running
 See **Setup on the Pi** in [CLAUDE.md](CLAUDE.md) for the full steps. In short:
@@ -35,7 +35,7 @@ cp .env.example .env        # then edit; add ELEVENLABS_API_KEY for captions/cat
 python doa_calibrate.py     # once, with the mic mounted
 python server.py            # everything
 ```
-Bench tests: `display_cue.py` (display), `motor_test.py` (gentle motor power ramp), `haptics.py` (turn patterns).
+Bench tests: `display_cue.py` (display), `motor_test.py` (3 buzzes at a fixed 0.25), `haptics.py` (guiding buzz).
 ElevenLabs tests: `live_captions.py` (captions alone), `scribe_test.py` (batch Scribe). Details: [ELEVENLABS.md](ELEVENLABS.md).
 
 ## Roadmap

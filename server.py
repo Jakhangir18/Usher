@@ -257,6 +257,11 @@ VOLUME_HEARTBEAT_SEC = float(os.environ.get("VOLUME_HEARTBEAT_SEC", "3"))
 # The window must cover hop + Whisper time + the phrase, so every "Hello Jax" lands whole
 # in at least one window. faster-whisper pads input to 30 s, so a longer window costs ~nothing.
 WAKE_WINDOW_SEC = float(os.environ.get("WAKE_WINDOW_SEC", "4.0"))
+
+# Whisper (tiny.en) is only the "Hello Jax" detector; its rough transcripts are never shown on the
+# display (captions come from ElevenLabs). Hidden by default so they don't drown out the real
+# captions in the terminal. WAKE_LOG=1 shows them (useful when tuning the wake phrase).
+WAKE_LOG = os.environ.get("WAKE_LOG", "0").strip() == "1"
 WAKE_HOP_SEC = float(os.environ.get("WAKE_HOP_SEC", "1.0"))
 
 SAMPLE_RATE = 16000
@@ -486,8 +491,16 @@ _audio_blocks = collections.deque(maxlen=_MAX_BLOCKS)
 _audio_lock = threading.Lock()
 _audio_stream = None
 
+# Audio watchdog: if the mic drops off USB (loose cable, power dip), the stream silently stops
+# calling back and the ring buffer freezes (Whisper then re-transcribes the same 4 s forever).
+# wake_loop() reopens the stream when no audio has arrived for AUDIO_STALL_SEC.
+AUDIO_STALL_SEC = 2.0
+_last_audio_time = 0.0
+
 
 def _audio_callback(indata, frames, time_info, status):
+    global _last_audio_time
+    _last_audio_time = time.monotonic()
     if status:
         print(f"audio stream: {status}")  # e.g. input overflow when the CPU is saturated
     block = indata[:, AUDIO_CHANNEL].copy()
@@ -561,7 +574,7 @@ def _print_device_list():
 
 
 def start_audio_stream():
-    global _audio_stream
+    global _audio_stream, _last_audio_time
 
     if _audio_stream is not None:
         return
@@ -586,7 +599,9 @@ def start_audio_stream():
             latency='high',
         )
         _audio_stream.start()
+        _last_audio_time = time.monotonic()  # watchdog counts from now, not from program start
     except Exception as exc:
+        _audio_stream = None  # so a later retry actually tries again
         print()
         print(f"ERROR: couldn't open audio stream on device {device!r}: {exc}")
         print("Available input devices:")
@@ -604,6 +619,31 @@ def start_audio_stream():
         name = str(device)
 
     print(f"    AUDIO_DEVICE   = [{device}] {name}")
+
+
+def _reopen_mic():
+    """Watchdog helper (runs in a thread): abort the dead stream, re-scan devices, reopen. True if reopened."""
+    global _audio_stream
+    stream, _audio_stream = _audio_stream, None
+    if stream is not None:
+        try:
+            stream.abort()  # abort, not stop: stop() waits for buffers that will never drain
+            stream.close()
+        except Exception as exc:
+            print(f"    (closing old stream: {exc!r})")
+    try:
+        # PortAudio only lists devices at start-up; re-scan so the re-plugged mic is found.
+        sd._terminate()
+        sd._initialize()
+    except Exception as exc:
+        print(f"    (re-scanning audio devices: {exc!r})")
+    try:
+        start_audio_stream()
+        print("    audio: mic reopened")
+        return True
+    except Exception as exc:
+        print(f"    audio: couldn't reopen yet ({exc!r}); retrying")
+        return False
 
 
 def stop_audio_stream():
@@ -788,7 +828,7 @@ def transcribe_audio(audio_array, gate=True):
         print(f"Whisper transcription error: {exc}")
         return "", []
 
-    if gate:
+    if gate and WAKE_LOG:
         print(f"    timing: silero {t1 - t0:.2f}s, whisper {time.monotonic() - t1:.2f}s")
 
     if not text:
@@ -1375,6 +1415,25 @@ def _spawn(coro):
     task.add_done_callback(_background_tasks.discard)
 
 
+TRACK_WINDOW_SEC = 0.4   # fresh speech readings used to follow the speaker during a guide
+TRACK_MAX_JUMP = 60      # ignore readings this far from where we expect them (someone else talking)
+
+
+def _track_speaker(expected):
+    """
+    For haptics.guide(): the speaker's current head-relative direction while they keep talking
+    (the mic is on the head, so it changes as the wearer turns), or None if there's no fresh
+    speech reading near where we expect them.
+    """
+    cutoff = time.monotonic() - TRACK_WINDOW_SEC
+    with _doa_lock:
+        angles = [a for t, a in _doa_history if t >= cutoff]
+    mean = _circular_mean(angles)
+    if mean is None or angle_difference(mean, expected) > TRACK_MAX_JUMP:
+        return None
+    return mean
+
+
 def _speaker_directions(turns, clip_start):
     """Each Scribe speaker's direction: mean of the speech DOA readings taken while they were talking."""
     out = {}
@@ -1431,7 +1490,15 @@ async def _catch_up(wake_angle, wake_time):
         # arrow still points at them). Without live captions, Scribe's own ?/?? is fine.
         label = labels[caller]
         if _live_people is not None:
-            label = (_live_people.nearest(directions[caller]) if caller in directions else None) or ""
+            # Simple name rules on the voice-identified turns too ("I'm Sam" -> that person = SAM).
+            for speaker, _, _, ws in turns:
+                name = scribe.find_self_name(" ".join(scribe.clean_words(ws)),
+                                             exclude=[USER_NAME, *USER_NAME_ALIASES])
+                person = _live_people.nearest(directions[speaker]) if speaker in directions else None
+                if name and person:
+                    _live_people.set_name(person, name)
+            person = _live_people.nearest(directions[caller]) if caller in directions else None
+            label = _live_people.display(person) or ""
         display_cue.show_caption_async(label, text, where)
     except Exception:
         print("    catch-up failed (arrow/motors unaffected):")
@@ -1466,6 +1533,7 @@ class _ServerDirection:
 
 async def _live_caption_loop(live_captions):
     """Keep a Scribe Realtime session running; reconnect with backoff (e.g. hotspot drops)."""
+    print("    live captions: task started")
     direction = _ServerDirection(live_captions.DIRECTION_WINDOW)
     backoff = {"sec": 2.0}
 
@@ -1549,11 +1617,26 @@ async def wake_loop():
     is busy: the next window simply covers what was said meanwhile.
     """
 
-    global _last_wake
+    global _last_wake, _last_audio_time
     last_heartbeat = 0.0
+    reopen_failures = 0
 
     while True:
         tick = time.monotonic()
+
+        if tick - _last_audio_time > AUDIO_STALL_SEC:
+            # Mic stopped delivering audio (e.g. USB drop-out): drop the frozen audio and reopen.
+            # The PortAudio calls can block on a vanished device, so they run off the event loop.
+            print(f"WARNING audio: no audio for {tick - _last_audio_time:.1f}s, reopening the mic...")
+            with _audio_lock:
+                _audio_blocks.clear()
+            ok = await asyncio.to_thread(_reopen_mic)
+            reopen_failures = 0 if ok else reopen_failures + 1
+            # Give the reopened stream AUDIO_STALL_SEC; back off up to 10 s if the mic stays missing.
+            _last_audio_time = time.monotonic() + min(10.0, 2.0 * reopen_failures)
+            await asyncio.sleep(1.0)
+            continue
+
         audio = _snapshot_buffer(WAKE_WINDOW_SEC)
         spans, peak = _loud_spans(audio, time.monotonic())
 
@@ -1571,7 +1654,9 @@ async def wake_loop():
 
             t0 = time.monotonic()
             transcript, alternatives = await asyncio.to_thread(transcribe_audio, audio)
-            print(f"{tag} heard: \"{transcript}\" (whisper {time.monotonic() - t0:.2f}s)")
+            if WAKE_LOG:
+                print(f"{tag} whisper (wake check only, not captions): \"{transcript}\" "
+                      f"({time.monotonic() - t0:.2f}s)")
 
             # Wake check first, before dedupe or broadcasting: this is the latency-critical path.
             # Only the wake phrase ("Hello Jax" or a variation) triggers, not the name on its own.
@@ -1581,7 +1666,7 @@ async def wake_loop():
                 now = tick
                 if now - _last_wake >= WAKE_COOLDOWN_SEC:
                     _last_wake = now
-                    haptics.guide(angle)
+                    haptics.guide(angle, track=_track_speaker)
                     display_cue.show_async(angle)
                     print(f"{tag} wake phrase: BUZZ toward {display_cue.direction(angle)} ({angle:.0f} deg)")
                     if CATCHUP_SEC and ELEVENLABS_API_KEY:

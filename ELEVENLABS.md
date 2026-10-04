@@ -16,7 +16,7 @@ The arrow/motor path never depends on ElevenLabs. No internet or no key = no cap
 ## How it all runs together (`python server.py`)
 
 One program, one mic stream (6 channels):
-- **"Hello Jax"** (local Whisper on ch2) → full turn pattern on the motors + arrow on the display, then **catch-up**.
+- **"Hello Jax"** (local Whisper on ch2) → soft guiding buzz on the motors + arrow on the display, then **catch-up**.
 - **Live captions** (Scribe Realtime on ch0) run the whole time in the background (`LIVE_CAPTIONS=1`).
 - **Motors only fire for "Hello Jax"**, never for captions (decision: fewer chances for wrong cues).
 - Display priority: the arrow and catch-up text own the screen; live caption updates pause until they're done.
@@ -33,8 +33,8 @@ can use the mic and the display).
 |---|---|---|
 | Shared Scribe helpers (batch API, WAV packing, speaker turns, `?`/`??` labels, filler cleanup) | `scribe.py` | Used by everything below |
 | Batch Scribe test (record or WAV → speaker turns, optional playback on the OLED) | `scribe_test.py` | **Tested on the Pi** |
-| Live captions engine | `live_captions.py` (`run()`) | **Tested standalone** (many rounds); merged into `server.py`, **merged version not yet tested** |
-| Catch me up on each "Hello Jax" | `server.py` (`_catch_up`) | Written, **not yet tested** |
+| Live captions engine | `live_captions.py` (`run()`) | **Tested** standalone and inside `server.py` (full runs on the Pi) |
+| Catch me up on each "Hello Jax" | `server.py` (`_catch_up`) | **Tested** on the Pi (0.6–2.4 s, 2–3 speakers separated) |
 | Display caption modes | `display_cue.py` (`show_caption`, `show_live`) | Both work on the OLED |
 
 ### Test results so far
@@ -125,10 +125,23 @@ colours. Tools we have: inverted text (filled box), boxes, position. Only one pr
 One-screen test (screen clears after 4 s, so watch it):
 `python -c "import display_cue, time; display_cue.show_live('??', [('?', 'Hello, my name is Oliver.'), ('??', 'I am testing from the right.')], 'left'); print('drawn'); time.sleep(5)"`
 
+### Names (simple rules, no Gemini)
+`scribe.find_self_name()` spots self-introductions: "I'm Sam", "I am Sam", "my name is Sam", "my name's Sam",
+"call me Sam" (the name must be capitalised, as Scribe writes names; common non-names like "I'm Okay" are ignored;
+the wearer's own name is never learned). The person who said it (their direction's `?`/`??` label) is renamed, e.g.
+`?? → SAM`, shown in the yellow band and in catch-up. Checked on live caption pieces and on catch-up's
+voice-identified turns. Instant, free, offline. Not handled: "this is Sajad" (someone introducing another person)
+or names used in address ("Sam, did you..."); that's what Gemini could add later. Terminal: `name learned: ?? = SAM`.
+Tested 2026-10-03: names learned and shown. Scribe spelled one name three ways (Ajad/Sajjad/Sajad), so a similar
+spelling (difflib ratio ≥ 0.6) no longer replaces an existing name. A clearly different name at the same direction
+replaces it with a loud `name changed: … (was …)` line: that happened when both people stood on the same side, which
+direction-based people can't tell apart. Test and demo with people clearly apart (left and right).
+
 ## To do / ideas
-- [ ] Test the merged `server.py` (captions + "Hello Jax" + catch-up together); check the arrow isn't overwritten.
-- [ ] Test catch-up on the Pi (two people chat, one says "Hello Jax").
-- [ ] Names instead of `?`/`??`: send recent transcript to Gemini ("Hi, I'm Sam" → `??` = SAM).
+- [x] Merged `server.py` tested (captions + "Hello Jax" + catch-up together).
+- [x] Catch-up tested on the Pi.
+- [x] Names from self-introductions (simple rules, above). Tested on the Pi.
+- [ ] Gemini for the names the rules miss ("this is Sajad", "Sam, did you..."); also an MLH Gemini prize entry.
 - [ ] Sound awareness: Scribe's audio event tags (laughter, applause) → a distinct haptic pattern. Not a safety
       feature; don't pitch it as alarm detection. (Note: motors are currently "Hello Jax" only, by decision.)
 - [ ] Replies: wearer types/taps, ElevenLabs Text to Speech speaks it.
