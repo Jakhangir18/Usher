@@ -1,6 +1,7 @@
 """live_captions.People: direction-based speakers (?, ??) and the name rules."""
 
 import pytest
+from conftest import angle_near_zero
 
 import live_captions
 
@@ -46,5 +47,4 @@ def test_rule_names_only_unnamed_people_and_gemini_may_correct(capsys):
 
 def test_angle_gap_and_circular_mean_helpers():
     assert live_captions.angle_gap(350, 10) == 20
-    mean = live_captions.circular_mean([350, 10])
-    assert min(mean % 360, 360 - mean % 360) < 1e-6   # 0 or 360: same direction
+    assert angle_near_zero(live_captions.circular_mean([350, 10]))

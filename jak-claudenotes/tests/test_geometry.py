@@ -1,10 +1,10 @@
 """Angles, directions and the DOA history lookups shared by wake, catch-up and captions."""
 
-import math
 import time
 
 import numpy as np
 import pytest
+from conftest import angle_near_zero, set_doa_history
 
 import display_cue
 import live_captions
@@ -25,13 +25,8 @@ def test_calibration_flip_then_offset(monkeypatch):
     assert server._logical_azimuth_from_hardware_deg(45) == pytest.approx(45.0)
 
 
-def _near_zero(angle):
-    """0 and 360 (float rounding of a negative epsilon) are the same direction."""
-    return min(angle % 360, 360 - angle % 360) < 1e-6
-
-
 def test_circular_mean_wraps_and_cancels():
-    assert _near_zero(server._circular_mean([350, 10]))
+    assert angle_near_zero(server._circular_mean([350, 10]))
     assert server._circular_mean([80, 100]) == pytest.approx(90.0)
     assert server._circular_mean([90, 270]) is None
     assert server._circular_mean([]) is None
@@ -71,14 +66,8 @@ def test_loud_spans_finds_the_loud_frame():
     assert server._loud_spans(np.zeros(100, dtype="float32"), 1.0) == ([], 0.0)
 
 
-def _set_history(entries):
-    with server._doa_lock:
-        server._doa_history.clear()
-        server._doa_history.extend(entries)
-
-
 def test_angles_during_picks_readings_inside_spans_in_time_order():
-    _set_history([(0.0, 10), (1.0, 20), (2.0, 30), (3.0, 40), (4.0, 50)])
+    set_doa_history([(0.0, 10), (1.0, 20), (2.0, 30), (3.0, 40), (4.0, 50)])
     assert server._angles_during([(0.9, 2.1)], pad=0) == [20, 30]
     # Overlapping and unordered spans: each reading once, oldest first.
     assert server._angles_during([(2.9, 4.1), (0.9, 3.1)], pad=0) == [20, 30, 40, 50]
@@ -89,11 +78,11 @@ def test_angles_during_picks_readings_inside_spans_in_time_order():
 
 
 def test_direction_during_falls_back_to_latest_reading():
-    _set_history([])
+    set_doa_history([])
     with server._doa_lock:
         server._doa_azimuth_deg = 123.0
     assert server._direction_during([(0.0, 1.0)]) == 123.0
-    _set_history([(0.5, 80), (0.6, 100)])
+    set_doa_history([(0.5, 80), (0.6, 100)])
     assert server._direction_during([(0.0, 1.0)]) == pytest.approx(90.0)
 
 
@@ -102,7 +91,7 @@ def test_speaker_directions_and_find_caller():
              ["speaker_1", 3.0, 4.0, ["yeah", "sure"]],
              ["speaker_0", 5.0, 7.0, ["hello", "Jax,", "over", "here"]]]
     clip_start = 1000.0
-    _set_history([(1000.5, 268), (1001.5, 272), (1003.5, 90), (1005.5, 270), (1006.5, 270)])
+    set_doa_history([(1000.5, 268), (1001.5, 272), (1003.5, 90), (1005.5, 270), (1006.5, 270)])
     directions = server._speaker_directions(turns, clip_start)
     assert directions["speaker_0"] == pytest.approx(270.0)
     assert directions["speaker_1"] == pytest.approx(90.0)
@@ -114,8 +103,8 @@ def test_speaker_directions_and_find_caller():
 
 def test_track_speaker_only_follows_fresh_nearby_readings():
     now = time.monotonic()
-    _set_history([(now - 0.1, 60.0), (now - 0.05, 62.0)])
+    set_doa_history([(now - 0.1, 60.0), (now - 0.05, 62.0)])
     assert server._track_speaker(70.0) == pytest.approx(61.0)
     assert server._track_speaker(200.0) is None                     # someone else, >60 deg away
-    _set_history([(now - 2.0, 60.0)])
+    set_doa_history([(now - 2.0, 60.0)])
     assert server._track_speaker(60.0) is None                      # stale (older than 0.4 s)

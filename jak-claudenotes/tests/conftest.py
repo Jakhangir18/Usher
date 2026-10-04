@@ -69,3 +69,17 @@ class FakeDoa:
 # server.py starts its DOA poll thread at import; with the real reader it would retry USB
 # every second (or spawn sudo xvf_host 20 times a second with DOA_SOURCE=auto).
 doa_reader.open_doa = lambda source, xvf_host_path: FakeDoa()
+
+
+def set_doa_history(entries):
+    """Replace server._doa_history with [(monotonic_time, angle), ...] under its lock."""
+    import server
+
+    with server._doa_lock:
+        server._doa_history.clear()
+        server._doa_history.extend(entries)
+
+
+def angle_near_zero(angle, tol=1e-6):
+    """0 and 360 (float rounding of a negative epsilon) are the same direction."""
+    return min(angle % 360, 360 - angle % 360) < tol

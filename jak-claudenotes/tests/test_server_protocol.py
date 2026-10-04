@@ -1,6 +1,7 @@
 """server.py WebSocket contract for the web app: snapshot, hello/refine opt-in, caption and voice-ID lines."""
 
 import asyncio
+import collections
 import json
 
 import server
@@ -62,9 +63,8 @@ def test_caption_and_refined_lines_replace_live_ones_and_feed_gemini_log(monkeyp
     import refine
 
     monkeypatch.setattr(server, "_live_people", None)
-    monkeypatch.setattr(server, "_recent_captions", type(server._recent_captions)(maxlen=200))
-    monkeypatch.setattr(server, "_live_unrefined", type(server._live_unrefined)(maxlen=200))
-    monkeypatch.setattr(server, "_transcript_log", type(server._transcript_log)(maxlen=200))
+    for name in ("_recent_captions", "_live_unrefined", "_transcript_log"):
+        monkeypatch.setattr(server, name, collections.deque(maxlen=200))
     refiner = refine.Refiner(server.SAMPLE_RATE)
     v1 = refiner._new_voice()
     monkeypatch.setattr(server, "_refiner", refiner)
@@ -94,7 +94,7 @@ def test_caption_and_refined_lines_replace_live_ones_and_feed_gemini_log(monkeyp
     # The replaced live line is gone from the snapshot and Gemini's log; the voice line remains.
     assert [c["segment_id"] for c in server._recent_captions] == [refined["segment_id"]]
     assert [line[0] for line in server._transcript_log] == [refined["segment_id"]]
-    assert server._live_unrefined == type(server._live_unrefined)()
+    assert not server._live_unrefined
     assert v1.name is None   # no self-introduction in that line
 
 

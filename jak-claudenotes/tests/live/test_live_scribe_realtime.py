@@ -49,7 +49,7 @@ def test_realtime_session_end_to_end(monkeypatch):
     with wave.open(WAV) as w:
         assert (w.getframerate(), w.getnchannels()) == (16000, 1)
         pcm = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
-    published, wakes, log = [], [], []
+    published, wakes = [], []
 
     def on_text(text, label, final=False):
         hit = server.wake_phrase_detected(text, extra_names=False)

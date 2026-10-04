@@ -12,11 +12,15 @@ import base64
 import io
 import json
 import os
+import pathlib
 import sys
 import urllib.request
 import wave
 
 import numpy as np
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+import scribe  # noqa: E402  (the repo's WAV packer)
 
 MODEL = "gemini-3.8-flash-lite-tts"
 LINES = [
@@ -70,11 +74,7 @@ def main():
     if not key or len(sys.argv) != 2:
         raise SystemExit(__doc__)
     pcm = to_wav16k(*synthesize(key))
-    with wave.open(sys.argv[1], "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(16000)
-        w.writeframes(pcm.tobytes())
+    pathlib.Path(sys.argv[1]).write_bytes(scribe.wav_bytes(pcm, 16000))
     print(f"wrote {sys.argv[1]}: {len(pcm) / 16000:.1f} s, peak {abs(pcm).max() / 32768:.2f}")
 
 

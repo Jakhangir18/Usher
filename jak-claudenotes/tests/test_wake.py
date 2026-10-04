@@ -3,6 +3,7 @@
 import time
 
 import pytest
+from conftest import set_doa_history
 
 import server
 
@@ -66,12 +67,10 @@ def test_wake_cooldown_is_shared_between_whisper_and_elevenlabs(quiet_outputs):
     assert quiet_outputs[0][1] == 90.0 and quiet_outputs[2][1] == 100.0
 
 
-def _fill_history(angles, age=0.0):
+def _fill_history(angles):
+    """Fresh speech readings 50 ms apart, the newest one just now."""
     now = time.monotonic()
-    with server._doa_lock:
-        server._doa_history.clear()
-        for i, a in enumerate(angles):
-            server._doa_history.append((now - age - 0.05 * (len(angles) - i), a))
+    set_doa_history([(now - 0.05 * (len(angles) - i), a) for i, a in enumerate(angles)])
 
 
 def test_caption_wake_uses_current_speech_direction(quiet_outputs):
