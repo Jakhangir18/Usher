@@ -106,6 +106,7 @@ missing. Fix before the demo, the server will otherwise look healthy.
 | Camera panel dark, page works | `camera_server.py` not running or OpenCV missing | `/usr/bin/python3 camera_server.py`; `sudo apt install python3-opencv python3-flask` |
 | Server stops reacting | a hang somewhere | `pkill -USR1 -f '(^|[ /])server\.py'` from another terminal prints every thread's stack (the plain `-f server.py` form from CLAUDE.md also kills `camera_server.py`, see F9); then restart |
 | `Bus error` on Ctrl+C | USB reader torn down late (fixed by `_stop_doa`) | harmless; start again |
+| Motors buzz after `server.py` was stopped | pins released without a pull, MOSFET gate floating (R16) | `pinctrl set 4,5 op dl`, or start `server.py` again; a gate pull-down resistor is the real fix |
 
 ## Privacy answer for the judges
 

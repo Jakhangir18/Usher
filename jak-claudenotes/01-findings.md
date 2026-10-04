@@ -412,6 +412,12 @@ motors would buzz through boot and during any time no program owns the pins. If 
 have a gate pull-down, nothing happens. Not verified here (no hardware); it came from a review of
 the sibling hardware notes and was checked against the datasheet default only.
 
+The same floating gate matters at exit: when `server.py` stops, `haptics.stop()` drives both
+pins low, but gpiozero then releases them as inputs with no pull (`lgpio` `SET_PULL_NONE`), so the
+gate is left floating and a motor can stay on or start by itself until something drives the pin
+again. A gate pull-down fixes both cases; without it, `pinctrl set 4,5 op dl` after a stop drives
+the pins low from the shell.
+
 Check once after a cold boot, before `server.py` starts: `pinctrl get 4-5` (shows `pu` for
 pull-up) and feel whether the temples buzz. If they do: either move the motors to pull-down pins
 (for example GPIO13 and GPIO19, pins 33 and 35; change `LEFT_GPIO`/`RIGHT_GPIO` and
