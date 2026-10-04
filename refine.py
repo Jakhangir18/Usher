@@ -13,7 +13,8 @@ vote too, which covers voices that don't have a reference yet.
 
 Keeping the number of voices honest (first hardware test: 4 people became 16 voices):
 - every known voice gets a reference clip in every request (not just the most recent few);
-- a new voice needs MIN_NEW_SEC of clear speech; quiet speakers (distant chatter) can't create one;
+- a new voice needs MIN_NEW_SEC of clear speech and a direction not within SAME_DEG of a known
+  voice; quiet speakers (distant chatter) can't create one;
 - at most max_voices voices: past that, an unmatched speaker joins the voice from the nearest
   direction. A short unmatched bit joins a voice within NEAR_DEG, or the turn around it.
 
@@ -33,6 +34,7 @@ HOLD_SEC = 0.6       # a turn still running this close to the end of the audio w
 MIN_VOTE_SEC = 0.3   # overlap needed to tie a diarized speaker to a known voice
 MIN_NEW_SEC = 1.5    # clear speech needed before an unmatched speaker becomes a new voice
 NEAR_DEG = 45        # a short unmatched bit joins a known voice whose direction is this close
+SAME_DEG = 20        # any unmatched speaker this close to a known voice's direction joins it (no new voice)
 PAUSE_SPLIT_SEC = 1.0  # a pause this long starts a new line, even for the same voice
 MAX_HOLD_SEC = 8.0   # a turn held longer than this sends its finished words (long monologues)
 
@@ -77,6 +79,7 @@ class Refiner:
         self.prev = []          # [(start, end, vid)] labelled words of the last request (clock time)
         self.done_until = 0.0   # clock time of the last word already handled (sent or dropped)
         self.dropped = 0        # quiet turns/speakers dropped by the last process() call
+        self.dropped_spans = []  # their clock spans, so the server leaves those live lines alone
 
     def _new_voice(self):
         number = len(self.voices) + 1
@@ -123,7 +126,7 @@ class Refiner:
         running at the end of the audio), or None.
         """
         window_end = window_start + len(window) / self.rate
-        self.dropped = 0
+        self.dropped, self.dropped_spans = 0, []
         votes, live, speakers, last = {}, [], [], None
         for w in result.get("words") or []:
             kind = w.get("type")
@@ -156,6 +159,7 @@ class Refiner:
                      if self._rms(window, window_start, [(w[1], w[2]) for w in live if w[0] == sp]) < min_rms}
             if quiet:
                 self.dropped += len(quiet)
+                self.dropped_spans += [(w[1], w[2]) for w in live if w[0] in quiet]
                 live = [w for w in live if w[0] not in quiet]
                 speakers = [sp for sp in speakers if sp not in quiet]
         if not live:
@@ -204,9 +208,11 @@ class Refiner:
         for vid, s, e, words in turns:
             self.done_until = max(self.done_until, e)
             if not any(w[4] for w in words):
+                self.dropped_spans.append((s, e))
                 continue  # only sound tags, e.g. "(background noise)"
             if min_rms and self._rms(window, window_start, [(s, e)]) < min_rms:
                 self.dropped += 1
+                self.dropped_spans.append((s, e))
                 continue
             if angle_of:
                 angle = angle_of([(w[1], w[2]) for w in words if w[4]])
@@ -249,7 +255,9 @@ class Refiner:
             angle = angle_of([(w[1], w[2]) for w in live if w[0] == sp and w[4]]) if angle_of else None
             full = len(self.voices) >= self.max_voices
             near = self._nearest(angle, exclude=used) or (self._nearest(angle) if full else None)
-            if talk.get(sp, 0.0) >= MIN_NEW_SEC and not full:
+            if near and near[1] <= SAME_DEG:  # right where a known voice usually is: probably them
+                mapping[sp] = near[0]
+            elif talk.get(sp, 0.0) >= MIN_NEW_SEC and not full:
                 voice = self._new_voice()
                 voice.angle = angle
                 mapping[sp] = voice.id
@@ -274,9 +282,10 @@ class Refiner:
                 word[0] = known
             known = word[0]
         if live and live[0][0] is None and any(w[4] for w in live):  # nothing to merge into
-            if len(self.voices) < self.max_voices:
+            talk = sum(w[2] - w[1] for w in live if w[4])
+            if not self.voices or (talk >= MIN_NEW_SEC and len(self.voices) < self.max_voices):
                 vid = self._new_voice().id
-            else:  # full: the voice from the nearest direction, else whoever spoke last
+            else:  # too short to be someone new, or full: nearest direction, else whoever spoke last
                 angle = angle_of([(w[1], w[2]) for w in live if w[4]]) if angle_of else None
                 near = self._nearest(angle)
                 vid = near[0] if near else max(self.voices.values(), key=lambda v: v.last_heard).id

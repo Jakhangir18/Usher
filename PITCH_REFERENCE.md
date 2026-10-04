@@ -104,7 +104,7 @@ earlier project SPOOT.
   triggers, because people say names all the time.
 - Whisper usually hears "Jax" as "jacks" or "jack". We match by sound (Metaphone) and accept "jack" only after a
   greeting.
-- **ElevenLabs as a second, faster trigger:** the live caption guess contains "Hello Jax" ~0.2 s after it's said.
+- **ElevenLabs as a second, faster trigger:** the live caption guess contains "Hello Jax" within a fraction of a second (ElevenLabs quotes ~150 ms; we didn't time it).
   The same rule and a shared cooldown mean one buzz per phrase, from whichever engine hears it first. Whisper
   remains the offline fallback.
 
@@ -154,13 +154,14 @@ earlier project SPOOT.
 ### 5.7 Voice-identified transcript (the web app's "ideal version")
 - The headset needs captions **instantly**, so it uses Realtime with direction-based speakers. Directions drift when
   the wearer turns their head, so the same person can reappear as a new label.
-- The web app can wait a couple of seconds. After each caption finishes, the Pi sends **batch Scribe** the audio
+- The web app can wait a few seconds (about 2–4 s in practice). After each caption finishes, the Pi sends **batch Scribe** the audio
   since the last voice-identified line, plus a 3 s overlap, at most 20 s. Batch Scribe tells speakers apart
   **by voice**, and the app swaps the faint live line for the voice-identified one once that person's turn ends.
 - **Problem:** batch Scribe numbers speakers per request (speaker 0 in one call can be speaker 1 in the next).
 - **Our fix (`refine.py`):** each request starts with a short reference clip of every voice heard so far. Whichever
   speaker the diarizer puts on V2's reference clip *is* V2. Words that overlap the previous request also vote. So
-  V1, V2, V3 stay the same people for the whole session, however the wearer moves.
+  V1, V2, V3 are meant to stay the same people for the whole session, however the wearer moves. The first
+  hardware test showed this is hard in a busy room (see below); the fixes are not yet tested on hardware.
 - **Safeguards:**
   - Quiet speakers and turns (distant chatter) are dropped and can't become a voice.
   - A new voice needs 1.5 s of clear speech.
@@ -219,14 +220,14 @@ directions all work this way.
 | AI | **Google Gemini 3.5 Flash-Lite** (REST, JSON output): names + summary |
 | Motors / display | gpiozero + lgpio (PWM), Adafruit CircuitPython SSD1306 + Pillow (I2C) |
 | Servers | websockets (asyncio, :8765), Flask (camera + web app, :8081), OpenCV (camera capture → JPEG) |
-| Design | Figma (web app redesign), Atkinson Hyperlegible font (Braille Institute, for low-vision readers; bundled), CAD for the headset |
+| Design | Figma (web app redesign in progress), Atkinson Hyperlegible font (Braille Institute, for low-vision readers; bundled), CAD for the headset |
 
 ## 8. Numbers we measured
 
 | What | Result |
 |---|---|
 | "Hello Jax" → arrow (Whisper) | ~1–2 s (0.8–1.6 s per Whisper window on the Pi 5) |
-| ElevenLabs live guess containing "Hello Jax" | ~0.2 s after it's said |
+| ElevenLabs live guess containing "Hello Jax" | Noticeably faster than Whisper in testing (ElevenLabs quotes ~150 ms; we didn't time it) |
 | Direction accuracy after calibration | 3–11° error, ~20 speech readings/s |
 | Catch-up (batch Scribe, 30 s clip) | 0.6–2.4 s round trip |
 | Batch Scribe, 20 s clip | 1.3–1.5 s, two speakers separated correctly turn by turn |
@@ -257,7 +258,7 @@ directions all work this way.
   adds words. A bad Wi-Fi connection can never stop someone getting your attention.
 - **Three speech engines, each for what it's best at:**
   - Whisper (local, offline): wake phrase.
-  - ElevenLabs Realtime (~0.2 s): captions and the faster wake.
+  - ElevenLabs Realtime (fraction of a second): captions and the faster wake.
   - ElevenLabs batch (voice identification): catch-up and the web app transcript.
 - **Directions for the headset, voices for the web app.** The headset can't wait, so it uses instant
   direction-based speakers. The web app can wait 1–2 s for voice-identified speakers. Speed for the wearer,
@@ -321,18 +322,20 @@ directions all work this way.
 |---|---|---|
 | Camera feed broke in the browser | Browser auto-upgraded the camera URL to HTTPS; the Pi only speaks HTTP | The Pi serves the page and camera from the same address |
 | Web page loaded with no styling | Flask's built-in `/static` route pointed at a folder that didn't exist | Pointed it at the web app's folder |
-| (Caught in code review) Voice-ID lines could delete live text they never contained, and duplicated lines after a page reload | After an error or while no page was open, the "what's been handled" marker didn't move with the audio actually sent | The marker moves with every gap; live lines from a gap are kept, never "replaced" |
+| (Caught in code review) Voice-ID lines could delete live text they never contained, and duplicated lines after a page reload | After an error or while no page was open, the "what's been handled" marker didn't move with the audio actually sent | The marker moves with every gap; live lines from a gap, or from speech judged too quiet, are kept rather than "replaced" |
 | 4 people became 16 voices in a busy room | Only the 4 most recent voices had reference clips; short talkers never got one; chatter from other teams created voices | Reference clip for every voice, 1.5 s of clear speech to create one, quiet speakers ignored, a voice cap with a nearest-direction fallback |
 | Reticle pinged from random places | Without speech, the mic's direction readings jump between beams | Ping only on speech with agreeing direction readings |
 | (Caught in code review) One "Hello Jax" could buzz twice | When Whisper fired first, the caption trigger didn't remember it had seen the phrase | Once the phrase is seen in a caption piece, that piece can't trigger again |
 
 ## 11. Privacy and safety
 
-- The device streams other people's speech to the cloud (ElevenLabs, Gemini) for captions. Nothing is saved to disk:
-  audio lives in a ~30 s in-memory buffer, and the camera stream isn't recorded.
+- The device streams other people's speech to the cloud (ElevenLabs, Gemini) for captions. Nothing is saved to disk
+  on the headset: audio lives in a ~30 s in-memory buffer, and the camera stream isn't recorded. Those cloud
+  services have their own data-retention policies, which a real product would need to choose and disclose.
 - API keys live in a local `.env` file that is never committed.
-- The demo web app has no login: anyone on the same Wi-Fi who knows the Pi's address could open it. That's fine for a
-  judged demo on a hotspot; a real product would need pairing and encryption.
+- The demo web app has no login: anyone on the same Wi-Fi who knows the Pi's address could open it and see live
+  transcripts. That's fine for a judged demo on our own hotspot; a real product would need pairing and encryption.
+  (An older teammate page in the repo root keeps a transcript history in the browser; the judge demo doesn't.)
 - The wake path works fully offline, so the core function doesn't depend on sending audio anywhere.
 - It is an attention and conversation aid, **not** a safety or alarm device, and we don't pitch it as one.
 
@@ -367,7 +370,7 @@ directions all work this way.
 - **ElevenLabs:** Realtime captions, batch voice identification (catch-up + voice-ID transcript), and the fast wake
   trigger.
 - **Gemini:** names and conversation summaries.
-- **Best Design (Figma):** the judge demo redesign.
+- **Best Design (Figma):** the judge demo redesign (in progress).
 
 ## 14. Credits
 

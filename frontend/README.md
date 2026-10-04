@@ -22,7 +22,7 @@ broke the feed) and the page connects to the headset by itself.
 | What | Where | Started by |
 |---|---|---|
 | Captions, voice-ID lines, summary, sound events | WebSocket `ws://<pi>:8765` | `python server.py` |
-| Headset camera (MJPEG) | `/camera/stream` on `http://<pi>:8081` | `/usr/bin/python3 camera_server.py` (needs `sudo apt install python3-opencv`; `CAMERA_DEVICE=/dev/video0` by default) |
+| Headset camera (MJPEG) | `/camera/stream` on `http://<pi>:8081` | `/usr/bin/python3 camera_server.py` (needs `sudo apt install python3-opencv python3-flask`, since it runs on the system Python; `CAMERA_DEVICE=/dev/video0` by default) |
 
 Messages (all JSON; `angle`: 0 = front, 90 = right, 270 = left, relative to the wearer's head):
 

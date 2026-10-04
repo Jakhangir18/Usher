@@ -11,7 +11,11 @@
   // refine: the server sends voice-identified lines ({type:"refined"}) that replace live ones, so
   // live captions are only the faint tail and don't count as people.
   const S = { lines: [], live: [], partial: null, sounds: [], people: new Map(), level: 'moderate',
-              refine: false, ws: null, retry: null, host: '', demo: false, demoTimer: null, chipAt: 0, last: null };
+              refine: false, session: null, ws: null, retry: null, host: '', demo: false, demoTimer: null, chipAt: 0, last: null };
+  // A fresh transcript (connecting, a server restart, or leaving the demo): no lines or people carried over.
+  function resetTranscript() {
+    S.lines = []; S.live = []; S.partial = null; S.people = new Map(); S.summary = null; S.last = null; S.session = null;
+  }
 
   const color = id => { if (!S.people.has(id)) S.people.set(id, { color: COLORS[S.people.size % COLORS.length], label: id }); return S.people.get(id).color; };
   const dirWord = a => { if (a == null) return ''; const e = ((a + 180) % 360) - 180; return Math.abs(e) <= 15 ? 'front' : Math.abs(e) >= 120 ? 'behind' : e > 0 ? 'right' : 'left'; };
@@ -70,7 +74,13 @@
   // ---------- transcript ----------
   function receive(m) {
     if (!m || typeof m !== 'object') return;
-    if (m.type === 'snapshot') { S.refine = !!m.refine; return Array.isArray(m.captions) && m.captions.forEach(receive); }
+    if (m.type === 'snapshot') {
+      if (m.session_id && S.session && m.session_id !== S.session) resetTranscript();  // server restarted
+      if (m.session_id) S.session = m.session_id;
+      S.refine = !!m.refine;
+      Array.isArray(m.captions) && m.captions.forEach(receive);
+      return render();
+    }
     if (m.type === 'sound' && typeof m.angle === 'number') return void S.sounds.push({ angle: m.angle, level: +m.level || 0, t: performance.now() });
     if (m.type === 'summary') {
       // Gemini: summary bullets + learned names (relabel everyone already on screen).
@@ -184,11 +194,15 @@
   function connect(host) {
     stopDemo(); disconnect(true); S.host = host; store('usher.host', host);
     S.refine = false;  // the server's snapshot says whether voice-ID lines are coming
+    resetTranscript(); render();
     let everOpened = false;
     const open = () => {
       status('Connecting…');
       try { S.ws = new WebSocket(`ws://${host}:8765`); } catch { status('Bad address'); return; }
-      S.ws.onopen = () => { everOpened = true; status('Headset connected', true); };
+      S.ws.onopen = () => {
+        everOpened = true; status('Headset connected', true);
+        try { S.ws.send(JSON.stringify({ type: 'hello', refine: true })); } catch { }  // ask for voice-ID lines
+      };
       S.ws.onmessage = ev => { try { receive(JSON.parse(ev.data)); } catch { } };
       S.ws.onclose = () => {
         if (S.host !== host) return;
@@ -236,7 +250,7 @@
   function stopDemo() { clearInterval(S.demoTimer); S.demo = false; $('demo').textContent = 'Try demo'; document.querySelectorAll('.figure').forEach(f => f.classList.remove('speaking')); }
   $('demo').onclick = () => {
     if (S.demo) return stopDemo();
-    disconnect(true); status('Demo mode'); S.demo = true; S.refine = true; $('demo').textContent = 'End demo';
+    disconnect(true); resetTranscript(); status('Demo mode'); S.demo = true; S.refine = true; $('demo').textContent = 'End demo';
     let i = 0, word = 0, pause = 0;
     S.demoTimer = setInterval(() => {
       if (pause) { pause--; return; }

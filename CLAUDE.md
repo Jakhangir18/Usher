@@ -83,8 +83,9 @@ Built on two of a teammate's prior hackathon repos:
    Audio stream opened with `latency='high'` (one startup "input overflow" seen before). Wake cooldown is measured
    from the window's capture time so Whisper jitter can't cause a double announcement.
 
-Current focus: the merged demo program (see "One program for the demo" below). Phone/PWA is out of scope: Flask still runs
-(`/state` works), but `index.html`/`manifest.json` aren't in this repo, so `/` and `/manifest.json` return 404.
+Current focus: the merged demo program (see "One program for the demo" below). Phone/PWA is out of scope. server.py's
+Flask on :5000 still serves `/state` and, since the merge with main, teammates' older page (root `index.html`,
+`static/`; it keeps transcript history in the browser). The judge demo is `frontend/` on :8081 (camera_server.py).
 
 ## Setup on the Pi (from scratch)
 1. `sudo apt install -y libportaudio2 python3-lgpio i2c-tools sox` and enable I2C: `sudo raspi-config nonint do_i2c 0`.

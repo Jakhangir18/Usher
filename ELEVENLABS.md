@@ -48,7 +48,7 @@ can use the mic and the display).
 | Catch me up on each "Hello Jax" | `server.py` (`_catch_up`) | **Tested** on the Pi (0.6–2.4 s, 2–3 speakers separated) |
 | Display caption modes | `display_cue.py` (`show_caption`, `show_live`) | Both work on the OLED |
 | Fast wake from live captions | `server.py` (`_caption_wake`) | **Tested** on the Pi |
-| Voice-identified lines for the web app | `refine.py`, `server.py` (`_refine_loop`) | Built 2026-10-04, offline test `refine_test.py`; not yet run on the Pi |
+| Voice-identified lines for the web app | `refine.py`, `server.py` (`_refine_loop`) | **Tested** on the Pi 2026-10-04 (worked; split 4 people into 16 voices). The fixes for that aren't tested on hardware yet |
 
 ### Test results so far
 - **Batch Scribe (`scribe_v2`):** 20 s clip → **1.3–1.5 s** round trip. Two speakers separated correctly turn by turn
@@ -143,13 +143,12 @@ One-screen test (screen clears after 4 s, so watch it):
 `scribe.find_self_name()` spots self-introductions: "I'm Sam", "I am Sam", "my name is Sam", "my name's Sam",
 "call me Sam" (the name must be capitalised, as Scribe writes names; common non-names like "I'm Okay" are ignored;
 the wearer's own name is never learned). The person who said it (their direction's `?`/`??` label) is renamed, e.g.
-`?? → SAM`, shown in the yellow band and in catch-up. Checked on live caption pieces and on catch-up's
-voice-identified turns. Instant, free, offline. Not handled: "this is Sajad" (someone introducing another person)
+`?? → SAM`, shown in the yellow band and in catch-up. Checked on live caption pieces (catch-up no longer
+learns names: its 30 s of directions drift while the wearer turns). Instant, free, offline. Not handled: "this is Sajad" (someone introducing another person)
 or names used in address ("Sam, did you..."); Gemini covers those (below). Terminal: `name learned: ?? = SAM`.
-Tested 2026-10-03: names learned and shown. Scribe spelled one name three ways (Ajad/Sajjad/Sajad), so a similar
-spelling (difflib ratio ≥ 0.6) no longer replaces an existing name. A clearly different name at the same direction
-replaces it with a loud `name changed: … (was …)` line: that happened when both people stood on the same side, which
-direction-based people can't tell apart. Test and demo with people clearly apart (left and right).
+Tested 2026-10-03: names learned and shown. The simple rule only names people who have no name yet; only Gemini can
+change or correct a name (Scribe spelled one name three ways, Ajad/Sajjad/Sajad, and the rules used to fight over it).
+Test and demo with people clearly apart (left and right): direction-based people can't tell two people on one side apart.
 
 ### Names + summary with Gemini (server.py `_gemini_loop`)
 Every `GEMINI_SUMMARY_SEC` (12 s), if new captions finished, the last ~40 caption pieces (with `?`/`??` labels and
@@ -174,12 +173,13 @@ so each request starts with a 2.5 s reference clip of every known voice: whichev
 V2's clip is V2. Words overlapping the previous request also vote. Finished turns go to the app as
 `type:"refined"` lines that replace the faint live ones (`replaces`). A turn is held while the speaker keeps
 talking (sent anyway after 8 s), quiet speakers/turns (`REFINE_MIN_RMS`, ch2) are dropped as distant chatter, and
-requests stop after 6 retries without a new live caption. Billed per audio second: roughly the speech time plus
-the reference clips. Offline test: `python refine_test.py`.
+requests stop after 6 retries without a new live caption. Only runs for web app pages that ask for it (a
+`hello` message), up to `REFINE_BUDGET_SEC` (3600 s of audio per server run). Billed per audio second: every request
+re-sends the reference clips, so during conversation it runs at roughly 8–15 s of audio per second. Offline test: `python refine_test.py`.
 First Pi test (2026-10-04): worked end to end (0.6–2.6 s per request), but 4 people (plus a busy hackathon room)
 became 16 voices: only the 4 most recent voices had reference clips, short talkers never got one, and chatter
 created voices. Fixed: every voice gets a reference, a new voice needs 1.5 s of clear speech, quiet speakers can't
-create one, and at most `REFINE_MAX_VOICES` (6) voices; past that an unknown voice joins the voice from the
+create one, an unmatched speaker within 20° of a known voice joins it, and at most `REFINE_MAX_VOICES` (6) voices; past that an unknown voice joins the voice from the
 nearest direction (each voice keeps a running direction, only used as this tie-breaker).
 
 ## To do / ideas
@@ -188,7 +188,7 @@ nearest direction (each voice keeps a running direction, only used as this tie-b
 - [x] Names from self-introductions (simple rules, above). Tested on the Pi.
 - [x] Gemini for names the rules miss + conversation summary. Tested on the Pi.
 - [x] Realtime backs up local Whisper for the wake phrase (keyterm "Jax"). Tested on the Pi.
-- [ ] Voice-ID lines: first run on the Pi; tune `REFINE_MIN_RMS`.
+- [ ] Voice-ID lines: re-test the voice fixes on the Pi; set `REFINE_MAX_VOICES` to the headcount, tune `REFINE_MIN_RMS`.
 - Decided against: sound-awareness haptics (not a safety device; motors are "Hello Jax" only) and spoken replies
   with Text to Speech (users speak for themselves).
 

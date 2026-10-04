@@ -1,5 +1,7 @@
 import asyncio
+import bisect
 import collections
+import concurrent.futures
 import difflib
 import faulthandler
 import signal
@@ -105,6 +107,7 @@ def _logical_azimuth_from_hardware_deg(raw_deg):
 
 
 CLIENTS = set()
+REFINE_CLIENTS = set()  # web app pages that asked for voice-ID lines (hello message)
 
 _ROOT = os.path.dirname(os.path.abspath(__file__))
 
@@ -330,6 +333,10 @@ _whisper_model = None
 _whisper_lock = threading.Lock()
 
 
+# One thread just for Whisper (the wake loop runs one window at a time).
+_WHISPER_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="whisper")
+
+
 def _get_whisper():
     """Return the faster-whisper model, loading it on first call."""
 
@@ -487,6 +494,10 @@ REFINE_DELAY_SEC = 0.3    # after a live caption finishes, before sending (lets 
 REFINE_RETRY_SEC = 1.5    # someone still talking at the end of the audio: look again this soon
 REFINE_MAX_RETRIES = 6    # ...at most this many times per new live caption
 REFINE_MAX_VOICES = int(os.environ.get("REFINE_MAX_VOICES", "6"))  # most voices it will tell apart (people at the table + a couple)
+# Spending cap: seconds of audio sent to batch Scribe per server run (reference clips included).
+# Each request re-sends the reference clips, so during conversation this runs at ~8-15 s of audio
+# per second while the app is open. 0 = no cap.
+REFINE_BUDGET_SEC = float(os.environ.get("REFINE_BUDGET_SEC", "3600"))
 REFINE_COMMIT_LAG = 1.5   # live captions commit up to ~1.5 s after the words (0.7 s silence + network)
 
 _caption_audio = None  # live_captions.CaptionAudio, fed from _audio_callback when captions are on
@@ -757,7 +768,12 @@ def _angles_during(spans, pad=None):
     pad = DOA_POLL_SEC if pad is None else pad  # readings are sparser than the 0.1 s frames
     with _doa_lock:
         history = list(_doa_history)
-    return [a for t, a in history if any(s - pad <= t <= e + pad for s, e in spans)]
+    # History is in time order: binary-search each span (this runs on the event loop, often).
+    times = [t for t, _ in history]
+    picked = set()
+    for s, e in spans:
+        picked.update(range(bisect.bisect_left(times, s - pad), bisect.bisect_right(times, e + pad)))
+    return [history[i][1] for i in sorted(picked)]
 
 
 def _direction_during(spans):
@@ -1124,14 +1140,17 @@ def _is_wake_name(word, targets):
         return False
 
 
-def wake_phrase_detected(text_or_alts):
-    """Return True if any STT hypothesis contains a greeting followed by the user's name."""
+def wake_phrase_detected(text_or_alts, extra_names=True):
+    """
+    Return True if any STT hypothesis contains a greeting followed by the user's name.
+    extra_names: also accept WAKE_EXTRA_NAMES (Whisper's mishearings like "jack").
+    """
 
     if not text_or_alts:
         return False
 
     alternatives = [text_or_alts] if isinstance(text_or_alts, str) else list(text_or_alts)
-    targets = _name_targets() + list(WAKE_EXTRA_NAMES)
+    targets = _name_targets() + (list(WAKE_EXTRA_NAMES) if extra_names else [])
 
     for alt in alternatives:
         # Strip apostrophes so "Jack's" -> "jacks".
@@ -1329,13 +1348,14 @@ def call_gemini_blocking(transcript, angle, volume, alternatives=None):
 
     url = (
         "https://generativelanguage.googleapis.com/v1beta/"
-        f"models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+        f"models/{GEMINI_MODEL}:generateContent"
     )
 
     request = urllib.request.Request(
         url,
         data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        # Key in a header, not the URL (URLs end up in logs and error messages).
+        headers={"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY},
         method="POST",
     )
 
@@ -1592,18 +1612,33 @@ def _wake(angle, source, when=None):
     return True
 
 
-def _caption_wake(text, label):
+CAPTION_WAKE_DIR_SEC = 1.0  # direction for the caption wake: speech readings from this last stretch
+
+
+def _caption_wake(text, label, final=False):
     """
     ElevenLabs as a fast wake trigger: Scribe's live guess shows "Hello Jax" ~0.2 s after it's
     said, sooner than Whisper's ~1-2 s. Same greeting+name rule and shared cooldown, so one
     "Hello Jax" fires once whichever hears it first; Whisper still covers being offline.
+    final: a finished piece (backup in case the live guesses missed it); it can be up to
+    MAX_PIECE_SEC old, so it never fires if any wake happened within that time.
     """
-    if not wake_phrase_detected(text):
+    # No WAKE_EXTRA_NAMES ("jack") here: Scribe spells Jax right, and "hey Jack" to a real Jack
+    # in the room shouldn't buzz. (Whisper needs it: it hears Jax as "jacks"/"jack".)
+    if not wake_phrase_detected(text, extra_names=False):
         return False
-    angle = _live_people.angles.get(label) if (_live_people is not None and label) else None
-    if angle is None:
-        now = time.monotonic()
-        angle = _direction_during([(now - 1.5, now)])
+    now = time.monotonic()
+    if final and now - _last_wake < WAKE_COOLDOWN_SEC + 6.0:  # 6.0 = live_captions.MAX_PIECE_SEC
+        return True
+    if final:
+        angle = _live_people.angles.get(label) if (_live_people is not None and label) else None
+        if angle is None:
+            angle = _direction_during([(now - 2.0, now)])
+    else:
+        # Where the speech is coming from right now, not the speaker label: the label only
+        # switches ~0.4-1.2 s after a new person starts talking, so "Hello Jax" from someone
+        # new would buzz toward whoever spoke before them.
+        angle = _direction_during([(now - CAPTION_WAKE_DIR_SEC, now)])
     _wake(angle, "ElevenLabs")
     # True even if the cooldown stopped it (Whisper fired first): this piece's later, longer
     # guesses still contain the phrase and must not buzz again once the cooldown runs out.
@@ -1621,6 +1656,12 @@ _refine_wake = None    # asyncio.Event set when a live caption finishes (created
 _refiner = None        # refine.Refiner while the refine loop runs
 _refined_count = 0     # voice-identified lines sent so far (numbers their segment ids)
 _live_final_count = 0  # finished live caption pieces so far (new speech for the refine loop)
+_refine_spent = 0.0    # seconds of audio sent to batch Scribe by the refine loop this run
+_refine_stopped = False  # spending cap reached
+
+
+def _refine_on():
+    return _refiner is not None and not _refine_stopped
 
 
 def _publish_caption(segment_id, label, text, is_final):
@@ -1715,7 +1756,7 @@ async def _refine_loop():
     after, while someone is still mid-sentence), batch-transcribe the audio since the last line sent with
     reference clips of known voices (refine.py) and publish the finished turns. Never raises.
     """
-    global _refiner
+    global _refiner, _refine_spent, _refine_stopped
     import live_captions  # already imported by main() (refine only runs with live captions)
     import refine
     _refiner = refine.Refiner(SAMPLE_RATE, max_voices=REFINE_MAX_VOICES)
@@ -1729,8 +1770,8 @@ async def _refine_loop():
         if seen != _live_final_count:  # new speech since the last request
             seen, retries = _live_final_count, 0
         now = time.monotonic()
-        if not CLIENTS:
-            # Nobody watching: don't pay for it, and don't re-send this stretch when a page opens
+        if not REFINE_CLIENTS:
+            # No web app showing voice-ID lines: don't pay for it, and don't re-send this stretch when a page opens
             # (it gets the live lines in its snapshot instead).
             _live_unrefined.clear()
             _refiner.done_until, _refiner.prev = now, []
@@ -1754,12 +1795,26 @@ async def _refine_loop():
             _live_unrefined.extend(kept)
             _refiner.done_until = window_start
         clip, spans, offset = _refiner.build_clip(window)
+        if REFINE_BUDGET_SEC and _refine_spent + len(clip) / SAMPLE_RATE > REFINE_BUDGET_SEC:
+            _refine_stopped = True
+            print(f"    refine: spending cap reached ({_refine_spent:.0f}s of audio sent, REFINE_BUDGET_SEC="
+                  f"{REFINE_BUDGET_SEC:.0f}); voice-ID lines off until restart, live captions continue")
+            await broadcast({"type": "snapshot", "session_id": _SESSION_ID, "refine": False, "captions": []})
+            return
+        _refine_spent += len(clip) / SAMPLE_RATE
         try:
             result, secs = await asyncio.to_thread(
                 scribe.transcribe, scribe.wav_bytes(clip, SAMPLE_RATE), ELEVENLABS_API_KEY)
             backoff = 0.0
             turns, pending = _refiner.process(result, spans, offset, window, window_start,
                                               min_rms=REFINE_MIN_RMS, angle_of=_refine_angle)
+            if _refiner.dropped_spans:
+                # Live lines committed during speech refine dropped as quiet: stop tracking them so
+                # no later line "replaces" (deletes) them; the app keeps them as ordinary lines.
+                kept = [(seg, t) for seg, t in _live_unrefined
+                        if not any(ds <= t <= de + REFINE_COMMIT_LAG for ds, de in _refiner.dropped_spans)]
+                _live_unrefined.clear()
+                _live_unrefined.extend(kept)
             for vid, start, end, text in turns:
                 _publish_refined(vid, start, end, text, pending)
         except Exception as exc:
@@ -1944,11 +1999,17 @@ async def _live_caption_loop(live_captions):
     def connected():
         backoff["sec"] = 2.0
 
+    attempt = 0
     while True:
+        attempt += 1
+        # Segment ids restart at 0 in every run(): prefix the attempt so a reconnect can't reuse
+        # "live-0" and overwrite or "replace" earlier lines in the app.
+        def publish(seg, label, text, is_final, attempt=attempt):
+            _publish_caption(f"{attempt}-{seg}", label, text, is_final)
+
         try:
             await live_captions.run(ELEVENLABS_API_KEY, _caption_audio, direction, _live_people,
-                                    on_ready=connected, on_text=_caption_wake,
-                                    publish=_publish_caption)
+                                    on_ready=connected, on_text=_caption_wake, publish=publish)
             print("    live captions: connection closed, reconnecting")
         except asyncio.CancelledError:
             raise
@@ -2009,17 +2070,28 @@ async def handle_client(websocket):
     CLIENTS.add(websocket)
     print(f"Client connected. Total: {len(CLIENTS)}")
     try:
-        await websocket.send(json.dumps({"type": "snapshot", "refine": _refiner is not None,
-                                         "captions": list(_recent_captions)}))
+        await websocket.send(json.dumps({"type": "snapshot", "session_id": _SESSION_ID,
+                                         "refine": _refine_on(), "captions": list(_recent_captions)}))
         if _last_summary:
             await websocket.send(json.dumps(_last_summary))
     except Exception:
         pass
 
     try:
-        await websocket.wait_closed()
+        # The web app says {"type":"hello","refine":true} when it shows voice-ID lines: only those
+        # clients keep the (billed) refine requests running, not other pages or tools.
+        async for raw in websocket:
+            try:
+                msg = json.loads(raw)
+            except ValueError:
+                continue
+            if isinstance(msg, dict) and msg.get("type") == "hello" and msg.get("refine"):
+                REFINE_CLIENTS.add(websocket)
+    except Exception:
+        pass  # connection dropped
     finally:
         CLIENTS.discard(websocket)
+        REFINE_CLIENTS.discard(websocket)
         print(f"Client disconnected. Total: {len(CLIENTS)}")
 
 
@@ -2067,7 +2139,10 @@ async def wake_loop():
             _spawn(broadcast(make_payload(angle, peak, stage="directional")))  # never wait on a slow app here
 
             t0 = time.monotonic()
-            transcript, alternatives = await asyncio.to_thread(transcribe_audio, audio)
+            # Own thread: cloud calls (catch-up, refine, Gemini) share the default pool and could
+            # queue ahead of the offline wake check on a hanging network.
+            transcript, alternatives = await asyncio.get_running_loop().run_in_executor(
+                _WHISPER_POOL, transcribe_audio, audio)
             if WAKE_LOG:
                 print(f"{tag} whisper (wake check only, not captions): \"{transcript}\" "
                       f"({time.monotonic() - t0:.2f}s)")

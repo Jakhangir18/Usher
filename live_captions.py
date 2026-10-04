@@ -235,11 +235,12 @@ async def run(key, audio, direction, people, on_ready=None, on_text=None, publis
     One Scribe Realtime session: stream `audio` (CaptionAudio), show captions on the display.
     `direction` needs current(), silent_for(), angles_between(); `people` is a People.
 
-    on_text(text, label) -> bool: called with each live guess and finished piece (server.py uses
-        it as a fast "Hello Jax" trigger). Return True if it acted; it's then not called again
-        for the same piece, so one "Hello Jax" fires once.
-    publish(segment_id, label, text, is_final): every caption update, for the companion app
-        (partial guesses with is_final=False, then the finished text with the same segment_id).
+    on_text(text, label, final=False) -> bool: called with each live guess and (final=True) each
+        finished piece (server.py uses it as a fast "Hello Jax" trigger). Return True if it acted;
+        it's then not called again for the same piece, so one "Hello Jax" fires once.
+    publish(segment_id, label, text, is_final): every caption update, for the web app (partial
+        guesses with is_final=False, then the finished text with the same segment_id). Segment
+        ids restart at 0 each run(); the caller makes them unique across reconnects.
 
     Returns/raises when the connection ends; callers decide whether to reconnect.
     """
@@ -557,7 +558,7 @@ async def run(key, audio, direction, people, on_ready=None, on_text=None, publis
                 state["provisional"] = False
                 state["last_final_text"] = text
                 if on_text and not state["woke"] and runs:
-                    on_text(" ".join(r for _, r in runs), info[0])  # in case the live guesses missed it
+                    on_text(" ".join(r for _, r in runs), info[0], True)  # in case the live guesses missed it
                 for i, (label, run) in enumerate(runs):
                     segments.append((label, run))
                     print(f"    caption {people.display(label):<6} {run}")
