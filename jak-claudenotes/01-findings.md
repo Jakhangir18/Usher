@@ -384,6 +384,25 @@ run with a counter.
 `/state` shows empty HUD fields while captions run. Nothing in the repo reads `/state` (both pages
 use the WebSocket); part of the legacy cleanup in F4.
 
+## R16 [check on the device] Motor pins GPIO4 and GPIO5 power up with internal pull-ups
+
+`haptics.py:27-28` (`LEFT_GPIO = 4`, `RIGHT_GPIO = 5`), `motor_test.py:16` (same pins). On
+Raspberry Pi boards GPIO0-8 come out of reset with the internal pull-up enabled and GPIO9-27 with
+the pull-down (BCM2835 datasheet, GPIO pull-up/down defaults; the Pi 5's RP1 keeps the same
+power-on defaults). The MOSFET trigger modules are driven straight from these pins. If a module
+has no pull-down of its own on the gate, the pull-up (tens of kΩ) can hold the gate high from
+power-on until `server.py` (or `motor_test.py`) claims the pin and drives it low: both temple
+motors would buzz through boot and during any time no program owns the pins. If the modules do
+have a gate pull-down, nothing happens. Not verified here (no hardware); it came from a review of
+the sibling hardware notes and was checked against the datasheet default only.
+
+Check once after a cold boot, before `server.py` starts: `pinctrl get 4-5` (shows `pu` for
+pull-up) and feel whether the temples buzz. If they do: either move the motors to pull-down pins
+(for example GPIO13 and GPIO19, pins 33 and 35; change `LEFT_GPIO`/`RIGHT_GPIO` and
+`motor_test.py` in the same commit, then re-run `python haptics.py`), or fit a ~10 kΩ resistor
+from each module's signal input to ground. Today: if the buzz at boot is the only symptom, start
+`server.py` right after boot and leave the wiring alone.
+
 ## Suspicions the reviewers could not confirm
 
 - `live_captions.py:367-372`: the choice between session start and the previous commit as the

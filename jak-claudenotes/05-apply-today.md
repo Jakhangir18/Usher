@@ -22,6 +22,7 @@ Rules for touching code on judging day:
 | R8 `pending` desync after a throttled commit | No | needs a slow uplink and a specific message order; the fix changes the commit bookkeeping | after the hackathon; a reconnect clears it (restart `server.py` if speaker labels look consistently wrong) | |
 | R9, R10, R11, R12 | No | rare timing paths, low impact | after the hackathon | |
 | R13, R14, R15, F2, F4, F5, F6, F7, F8 | No | cosmetic, legacy or lint | after the hackathon | |
+| R16 motors on pull-up pins GPIO4/5 | Check only | unverified without hardware; only matters if the temples buzz from power-on until `server.py` starts | none today; later move to pull-down pins or add gate pull-downs | cold boot with motors wired, no program running: temples silent; `pinctrl get 4-5` |
 | F3 ElevenLabs balance via the dashboard | n/a | the key has no `user_read`, by design | check the dashboard before judging | |
 
 ## The patches, ready to paste

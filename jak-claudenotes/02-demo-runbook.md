@@ -25,9 +25,13 @@ the rehearsal step is not optional.
 5. **Power and cables.** Motor modules on 3.3 V, the official 5 V/5 A supply, a firm USB cable on
    the mic: the first full run lost the mic to a USB drop-out, and the watchdog can only reopen a
    mic that comes back.
-6. **Whisper model is cached.** The first `python server.py` on a fresh clone downloads about
+6. **Cold-boot check for the motors.** Power the Pi with the motors wired, before any program
+   runs: the temples must stay silent. If they buzz until `server.py` starts, see R16 in
+   `01-findings.md` (GPIO4/5 power up with pull-ups); today, start `server.py` straight after
+   boot.
+7. **Whisper model is cached.** The first `python server.py` on a fresh clone downloads about
    75 MB; do that on Wi-Fi, not at the table.
-7. **Hotspot.** Laptop and Pi on the same hotspot. The page must be opened over plain `http://`;
+8. **Hotspot.** Laptop and Pi on the same hotspot. The page must be opened over plain `http://`;
    an `https://` page cannot reach `ws://` or the camera.
 
 ## Start order and what the terminal must say
