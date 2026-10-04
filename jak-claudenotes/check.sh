@@ -20,7 +20,7 @@ echo "== ruff (pyflakes + syntax errors) on the team code: report only"
   doa_calibrate.py camera_server.py motor_test.py scribe_test.py refine_test.py || true
 
 echo "== byte-compile every Python file"
-"$PY" -m compileall -q . >/dev/null && echo "ok" || rc=1
+"$PY" -m compileall -q . && echo "ok" || rc=1
 
 if command -v node >/dev/null; then
   echo "== JavaScript syntax"
@@ -28,7 +28,7 @@ if command -v node >/dev/null; then
 fi
 
 echo "== offline tests"
-"$PY" -m pytest -q jak-claudenotes/tests --ignore=jak-claudenotes/tests/live -p no:cacheprovider || rc=1
+"$PY" -m pytest -q jak-claudenotes/tests --ignore=jak-claudenotes/tests/live --ignore=jak-claudenotes/tests/heavy -p no:cacheprovider || rc=1
 
 if [ "${LIVE:-0}" = "1" ]; then
   echo "== live API tests (billed: ~11 s of audio to batch Scribe, ~15 s to Realtime, one Gemini request)"

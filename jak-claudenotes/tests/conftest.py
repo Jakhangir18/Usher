@@ -13,13 +13,17 @@ import types
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-# Same settings as .env.example (server.py reads them at import time).
+# The settings the tests assume (server.py and live_captions.py read them at import time). Set
+# outright, not setdefault: on the Pi the real .env (loaded by server.py for any key not yet set)
+# and the shell must not change the rule under test, e.g. WAKE_MAX_GAP=0 applied for finding R1.
 for key, val in {
     "DOA_SOURCE": "usb", "LIVE_CAPTIONS": "0", "USER_NAME": "Jax", "USER_NAME_ALIASES": "jacks,jaxx",
-    "WAKE_EXTRA_NAMES": "jack", "AUDIO_INPUT_CHANNELS": "6", "AUDIO_CHANNEL": "2",
+    "WAKE_EXTRA_NAMES": "jack", "WAKE_GREETINGS": "hello,helo,hallo,hullo,hi,hey,hiya",
+    "WAKE_MAX_GAP": "1", "WAKE_COOLDOWN_SEC": "4.5",
+    "AUDIO_INPUT_CHANNELS": "6", "AUDIO_CHANNEL": "2", "CAPTION_AUDIO_CHANNEL": "0",
     "DOA_FLIP_LEFT_RIGHT": "1", "DOA_OFFSET_DEG": "184", "VOLUME_HEARTBEAT_SEC": "0",
 }.items():
-    os.environ.setdefault(key, val)
+    os.environ[key] = val
 
 
 def _stub_module(name, **attrs):

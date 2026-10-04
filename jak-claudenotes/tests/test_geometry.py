@@ -7,6 +7,7 @@ import pytest
 from conftest import angle_near_zero, set_doa_history
 
 import display_cue
+import haptics
 import live_captions
 import server
 
@@ -52,7 +53,7 @@ def test_direction_word_eight_sectors(angle, word):
 ])
 def test_display_direction_matches_haptics_thresholds(angle, word):
     assert display_cue.direction(angle) == word
-    assert display_cue.FACING_DEG == 15
+    assert display_cue.FACING_DEG == haptics.FACING_DEG   # the arrow and the buzz agree on "facing"
 
 
 def test_loud_spans_finds_the_loud_frame():

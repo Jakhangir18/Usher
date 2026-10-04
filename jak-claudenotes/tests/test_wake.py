@@ -97,7 +97,7 @@ def test_the_wearer_introducing_themselves_does_not_wake(text):
     assert not server.wake_phrase_detected(text, extra_names=False)
 
 
-def test_whisper_path_still_accepts_plain_jack_while_captions_run():
-    """Documents R6: 'Hey Jack' to a real Jack buzzes through Whisper even though the caption path ignores it."""
+def test_extra_names_switch_controls_plain_jack():
+    """Documents the switch behind R6: the default (Whisper path) accepts "jack", extra_names=False (caption path) does not."""
     assert server.wake_phrase_detected("hey jack")
     assert not server.wake_phrase_detected("hey jack", extra_names=False)

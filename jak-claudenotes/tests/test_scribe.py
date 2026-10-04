@@ -40,7 +40,7 @@ def test_clean_words_drops_fillers_and_stutters_but_keeps_uh_huh():
 @pytest.mark.parametrize("text,name", [
     ("Hi, I'm Sam.", "Sam"), ("my name is Oliver.", "Oliver"), ("Call me Sajjad", "Sajjad"),
     ("I am Priya and this is Tom", "Priya"), ("I’m Sam", "Sam"),
-    ("I'm okay", None), ("I'm really tired", None), ("this is Sam", None), ("i'm jack", None),
+    ("I'm okay", None), ("I'm really tired", None), ("this is Sam", None), ("I'm Jack", None),
     ("I am Jax", None), ("I'm Jacks", None), ("", None),
 ])
 def test_find_self_name(text, name):

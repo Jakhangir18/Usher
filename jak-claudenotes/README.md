@@ -12,14 +12,14 @@ every finding comes with a patch and, where it was possible offline, a failing t
 | [`03-improvements.md`](03-improvements.md) | What to change after the hackathon, in order of value |
 | [`04-dev-env.md`](04-dev-env.md) | Running the checks on any laptop; what is stubbed and why |
 | [`check.sh`](check.sh) | One command: ruff, byte-compile, JS syntax, offline tests; `LIVE=1` adds the API tests |
-| [`tests/`](tests/) | 146 offline checks plus 7 expected failures that document F1, R1 and R2; 3 live API checks; 1 heavy Whisper check |
+| [`tests/`](tests/) | 147 offline checks plus 7 expected failures that document F1, R1 and R2; 3 live API checks; 1 heavy Whisper check |
 | [`tools/make_test_wav.py`](tools/make_test_wav.py) | Makes the two-voice test clip with Gemini TTS |
 
 ## Results at a glance
 
 | Check | Result |
 |---|---|
-| Offline tests (wake rule, angles, DOA lookups, catch-up helpers, people/names, haptics, display layout, WebSocket contract, refine) | 146 passed, 7 expected failures documenting findings F1, R1 and R2 |
+| Offline tests (wake rule, angles, DOA lookups, catch-up helpers, people/names, haptics, display layout, WebSocket contract, refine) | 147 passed, 7 expected failures documenting findings F1, R1 and R2 |
 | ruff (pyflakes) on the team code | 1 nit (`server.py:368`, f-string without placeholders) |
 | Byte-compile, `node --check` on both JS files | clean |
 | Gemini key + `gemini-3.5-flash-lite` | valid; names + summary JSON parsed through the production call |

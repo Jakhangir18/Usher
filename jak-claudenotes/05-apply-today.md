@@ -15,7 +15,7 @@ Rules for touching code on judging day:
 | R1 wearer's "Hi, I'm Jax" wakes | **Yes** | the wearer will introduce the persona to judges; a false buzz toward themselves plus a catch-up of their own words looks broken | `WAKE_MAX_GAP=0` in `.env` (no code), or the 4-line patch below | wearer says "Hi, I'm Jax": no buzz, no `wake phrase` line in the terminal. Teammate says "Hello Jax": buzz + arrow |
 | R2 OLED captions gone after a reconnect | **Yes** if the hotspot drops at all; otherwise know the workaround | the headset's main visible feature goes blank while everything else looks healthy | 3-line patch below in `live_captions.py` | with captions running, switch the hotspot off for 10 s, wait for `live captions: listening`, talk: words appear on the OLED within a second. Workaround without the patch: restart `server.py` |
 | R4 voice-ID budget lasts 4-7 minutes of talk | **Yes** (config only) | judges arrive in groups over hours; after the cap the web app shows only live lines | `REFINE_BUDGET_SEC=0` in `.env` (no cap, watch the ElevenLabs balance) or a larger number; restart `server.py` between groups | no `refine: spending cap reached` line during a 10-minute conversation with the page open |
-| R3 page reload after the cap sticks in voice-ID mode | Optional, 1 line | only bites after the cap and a reload; with R4 handled it should not happen | in `app.js`, move `S.refine = !!m.refine;` below `m.captions.forEach(receive);` | set `REFINE_BUDGET_SEC=30` for the test, talk with the page open until the cap line, reload the page, talk: new lines are normal (not faint "identifying voice..."). Restore the budget |
+| R3 page reload after the cap sticks in voice-ID mode | Optional, 1 line | only bites after the cap and a reload; with R4 handled it should not happen | in `app.js`, set `S.refine = !!m.refine;` again right after `m.captions.forEach(receive);` (keep the one before it: on a fresh load with voice-ID on, the replayed live lines must stay faint) | two checks. Fresh load while people talk with voice-ID on: replayed lines faint, "No one heard yet" until a VOICE-ID line arrives. Then `REFINE_BUDGET_SEC=30`, talk with the page open until the cap line, reload, talk: new lines normal. Restore the budget |
 | F1 + R6 "hey Jake" / "hey Jack" buzz through Whisper | Only if a Jake, Jack or Jackie will be near the table | rare otherwise; the ElevenLabs path already ignores them | 3-line patch below (keeps "jack" for Whisper's mishearing, drops jake/jackie), or remove `jack` from `WAKE_EXTRA_NAMES` (then Whisper alone misses "Hello Jax" when it hears "jack"; the caption path still catches it) | "hey Jake" from a teammate: nothing. "Hello Jax": buzz |
 | R5 duplicate lines in the web app transcript | **No**, watch for it | cosmetic; the patch touches refine bookkeeping that has not run on hardware since `f48118a` | 6 lines in `01-findings.md` R5 | if the rehearsal shows the same sentence twice (faint + VOICE-ID), apply R5 and re-run a 5-minute conversation |
 | R7 backup wake points at the previous speaker | No | needs the live guess and Whisper to both miss the phrase first | after the hackathon | |
@@ -95,8 +95,9 @@ and in `redraw()` inside `run()`:
     if (m.type === 'snapshot') {
       if (m.session_id && S.session && m.session_id !== S.session) resetTranscript();
       if (m.session_id) S.session = m.session_id;
+      S.refine = !!m.refine;   // before the replay: replayed live lines stay faint when voice-ID is on
       Array.isArray(m.captions) && m.captions.forEach(receive);
-      S.refine = !!m.refine;   // after the replay: the server's flag wins over replayed voice-ID lines
+      S.refine = !!m.refine;   // and after it: a replayed voice-ID line must not switch the mode back on
       return render();
     }
 ```

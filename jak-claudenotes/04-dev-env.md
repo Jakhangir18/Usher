@@ -13,8 +13,8 @@ python3 -m venv .venv-vps            # any name; keep it out of git (it is not i
 
 `requirements.txt` is a `pip freeze` of the Pi venv and does not install off the Pi (it pins
 `RPi.GPIO`, `rpi_ws281x`, `lgpio`, `sysv_ipc`, ...), which is why the dev environment installs the
-short list above instead. `faster-whisper` is deliberately not installed here: the wake rule is
-tested on text, and Whisper itself was tested on the Pi.
+short list above instead. `faster-whisper` is not needed for the offline suite (the wake rule is
+tested on text); install it only for the heavy check in `tests/heavy/`, which `check.sh` leaves out.
 
 ## Run
 

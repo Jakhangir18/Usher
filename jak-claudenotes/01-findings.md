@@ -123,6 +123,16 @@ grows when the event loop runs its callbacks. With a 64 ms mic callback and a re
 bound holds (tested: `tests/test_live_caption_audio.py`); a loop blocked for seconds could queue
 more. Not a demo risk; a `deque(maxlen=...)` would make it exact.
 
+## F9 [low, docs] `pkill -USR1 -f server.py` also hits `camera_server.py`
+
+`CLAUDE.md` ("If the server freezes: `pkill -USR1 -f server.py`") and `server.py:75-76`
+(`faulthandler.register(signal.SIGUSR1, all_threads=True)`). `pkill -f` matches the pattern
+anywhere in the command line, and `/usr/bin/python3 camera_server.py` contains `server.py`.
+Only `server.py` installs a SIGUSR1 handler; for `camera_server.py` the default action of
+SIGUSR1 is to terminate, so the documented command kills the judge page and the camera.
+Use `pkill -USR1 -f '(^|[ /])server\.py'` (matches `python server.py` and `/path/server.py`,
+not `camera_server.py`). The runbook uses that form.
+
 ## F8 [info] Lint
 
 `server.py:368`: f-string without placeholders (`ruff F541`). Nothing else from ruff's pyflakes
@@ -209,8 +219,9 @@ everything, the headset display stays blank (after the last frame clears in 4 s)
 catches up. Reconnects happen on a hotspot drop and whenever `send_audio` resyncs ("caption uplink
 behind").
 
-Test: `tests/test_display_cue.py::test_live_frames_after_a_caption_reconnect_are_drawn` (xfail;
-the companion test shows the in-session guard working).
+Test: `tests/test_live_caption_reconnect.py::test_frame_counter_keeps_rising_across_reconnects`
+(xfail; it runs `live_captions.run()` twice against a fake Scribe socket and records the frame
+numbers handed to `display_cue.show_live`). `tests/test_display_cue.py` shows the in-session guard.
 
 Fix: a counter that survives reconnects. In `live_captions.py`:
 
@@ -239,9 +250,13 @@ false` and the recent lines, which still include `refined` ones. Replaying a `re
 voice..." line, is not counted as a person, and only becomes a normal line after 12 s. Clients that
 were connected at the moment of the cap are fine (they get an empty snapshot).
 
-Fix (`app.js`): apply the server's flag after the replay:
+Fix (`app.js`): apply the server's flag before and after the replay. Before, so that on a fresh
+load with voice-ID on the replayed live lines stay faint and do not become people (`connect()`
+resets `S.refine` to false, `app.js:196`); after, so a replayed voice-ID line cannot switch the mode
+back on:
 
 ```js
+      S.refine = !!m.refine;
       Array.isArray(m.captions) && m.captions.forEach(receive);
       S.refine = !!m.refine;
       return render();
@@ -289,7 +304,8 @@ untrack a live line only when no turn published in this batch covers its commit 
 `server.py:1626-1628` removes `WAKE_EXTRA_NAMES` from the caption path with the comment '"hey
 Jack" to a real Jack in the room shouldn't buzz', but `server.py:2152` (`wake_loop`) calls
 `wake_phrase_detected(alternatives)` with the default `extra_names=True`. The buzz just arrives
-1-2 s later from Whisper. Test: `tests/test_wake.py::test_whisper_path_still_accepts_plain_jack_while_captions_run`.
+1-2 s later from Whisper. `tests/test_wake.py::test_extra_names_switch_controls_plain_jack` documents
+the switch; the decision itself lives in `wake_loop`, so no test can flag a fix yet.
 Together with F1 (jake/jackie/jock by sound) this is one decision: either accept "jack" on the
 Whisper path only while the caption session is down (a flag set in `connected()` and cleared when
 `run()` returns), or remove `jack` from `WAKE_EXTRA_NAMES` for the demo.

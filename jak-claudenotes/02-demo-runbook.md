@@ -94,7 +94,7 @@ missing. Fix before the demo, the server will otherwise look healthy.
 
 | Symptom | Likely cause | What to do |
 |---|---|---|
-| No buzz, but the terminal prints `wake phrase (...): BUZZ toward ...` | dummy motors, wiring, or 3.3 V missing | check for the `dummy motors` warning at start-up; `python motor_test.py left` |
+| No buzz, but the terminal prints `wake phrase (...): BUZZ toward ...` | dummy motors, wiring, or 3.3 V missing | check for the `dummy motors` warning at start-up; otherwise stop `server.py` (it holds GPIO4/5; a second program gets `GPIO busy`), run `python motor_test.py left`, start `server.py` again |
 | No `wake phrase` line at all | the phrase did not land in a window, or too quiet | set `WAKE_LOG=1` in `.env` to print Whisper's text; compare `listening… peak=` with `VOLUME_THRESHOLD` |
 | Buzz comes from the wrong side | calibration | `python doa_calibrate.py` with the mic mounted; always use the wearer's left/right |
 | `WARNING audio: no audio for 2.0s, reopening the mic...` | USB mic dropped (cable, power) | the watchdog reopens it; if it repeats, reseat the cable and check the supply |
@@ -104,7 +104,7 @@ missing. Fix before the demo, the server will otherwise look healthy.
 | Display shows nothing or stale text | two programs on the display, or an I2C hiccup | only `server.py` may run; restart it; `i2cdetect -y 1` must show `3c` |
 | Web page says `Can't reach ... is server.py running?` | server down, or laptop on another network | restart `server.py`; both devices on the hotspot; use `http://`, not `https://` |
 | Camera panel dark, page works | `camera_server.py` not running or OpenCV missing | `/usr/bin/python3 camera_server.py`; `sudo apt install python3-opencv python3-flask` |
-| Server stops reacting | a hang somewhere | `pkill -USR1 -f server.py` from another terminal prints every thread's stack; then restart |
+| Server stops reacting | a hang somewhere | `pkill -USR1 -f '(^|[ /])server\.py'` from another terminal prints every thread's stack (the plain `-f server.py` form from CLAUDE.md also kills `camera_server.py`, see F9); then restart |
 | `Bus error` on Ctrl+C | USB reader torn down late (fixed by `_stop_doa`) | harmless; start again |
 
 ## Privacy answer for the judges
