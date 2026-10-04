@@ -7,6 +7,7 @@ every finding comes with a patch and, where it was possible offline, a failing t
 | File | What it is for |
 |---|---|
 | [`01-findings.md`](01-findings.md) | Top-five table, then every finding with file:line, scenario and patch (F1-F8 from the read-through, R1-R15 from two independent reviewers, each re-verified), and the list of things checked and found correct |
+| [`05-apply-today.md`](05-apply-today.md) | Per finding: apply at the hackathon or not, why, the change, and the two-minute check on the Pi; the patches ready to paste |
 | [`02-demo-runbook.md`](02-demo-runbook.md) | Pre-demo checklist, start order, terminal lines to look for, failure/recovery table, privacy answer |
 | [`03-improvements.md`](03-improvements.md) | What to change after the hackathon, in order of value |
 | [`04-dev-env.md`](04-dev-env.md) | Running the checks on any laptop; what is stubbed and why |

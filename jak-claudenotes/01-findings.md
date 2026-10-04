@@ -2,6 +2,8 @@
 
 ## Read this first: the five things that matter before judging
 
+Whether to apply each one today, and how to check it on the Pi in two minutes: `05-apply-today.md`.
+
 | Id | What a judge could see | Fix size |
 |---|---|---|
 | R1 | The wearer saying "Hi, I'm Jax" buzzes the motors toward themselves and runs a catch-up on their own words | 2 lines, or `WAKE_MAX_GAP=0` in `.env` |
