@@ -6,6 +6,7 @@ Batch Scribe v2 (POST /v1/speech-to-text): accurate, labels speakers (diarize), 
 
 import io
 import os
+import re
 import time
 import wave
 
@@ -88,6 +89,31 @@ def clean_words(words):
 
 def clean_text(text):
     return " ".join(clean_words(text.split()))
+
+
+# Self-introductions: "I'm Sam", "I am Sam", "my name is Sam", "my name's Sam", "call me Sam".
+# Not "this is Sam" (usually introducing someone else, so it would name the wrong person).
+# The phrase is case-insensitive; the name must be capitalised (Scribe capitalises names).
+_INTRO = re.compile(r"\b(?i:i'?m|i am|my name is|my name's|call me),?\s+([A-Z][a-z]{1,15})\b")
+
+# Capitalised words that follow "I'm" but aren't names.
+_NOT_NAMES = {
+    "okay", "ok", "sorry", "fine", "good", "great", "here", "ready", "not", "just", "so", "gonna",
+    "going", "sure", "done", "back", "home", "in", "on", "the", "a", "an", "also", "still", "really",
+    "very", "pretty", "trying", "testing", "talking", "doing", "like", "yeah", "yes", "no", "well",
+    "actually", "good", "fine", "tired", "hungry", "confused", "excited", "happy", "sad", "glad",
+    "afraid", "with", "from", "at", "over", "out", "up", "down", "kidding", "serious", "late", "new",
+}
+
+
+def find_self_name(text, exclude=()):
+    """Name from a self-introduction in `text` ("Hi, I'm Sam" -> "Sam"), or None."""
+    skip = {n.lower() for n in exclude}
+    for match in _INTRO.finditer(text.replace("’", "'")):
+        name = match.group(1)
+        if name.lower() not in _NOT_NAMES and name.lower() not in skip:
+            return name
+    return None
 
 
 def speaker_turns(result):

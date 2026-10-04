@@ -22,6 +22,7 @@ program can use the mic and the display. Ctrl+C to stop. Needs ELEVENLABS_API_KE
 import asyncio
 import base64
 import collections
+import difflib
 import json
 import math
 import os
@@ -69,6 +70,10 @@ MIN_OVERRIDE_WORDS = 3    # word directions only re-split a piece for this many 
 # more than no label. Accurate who-said-what lives in the catch-up (batch Scribe voice ID).
 # Set LIVE_SPEAKER_TAGS=1 to bring the inverted tags back.
 LIVE_SPEAKER_TAGS = os.environ.get("LIVE_SPEAKER_TAGS", "0").strip() == "1"
+
+# The wearer's own name is never learned as someone else's ("I'm Jax" isn't a new person).
+WEARER_NAMES = [os.environ.get("USER_NAME", "Jax")] + [
+    a.strip() for a in os.environ.get("USER_NAME_ALIASES", "").split(",") if a.strip()]
 
 # Live captions read the chip's processed beam (ch0): in testing it kept nearby voices >= 0.034
 # with background below 0.02, while the raw mic (ch2) put the second speaker under the cut-off.
@@ -146,6 +151,28 @@ class People:
 
     def __init__(self):
         self.angles = {}   # label -> running mean angle
+        self.names = {}    # label -> learned name ("??" -> "SAM")
+
+    def set_name(self, label, name):
+        name = name.upper()[:10]
+        if label not in self.angles:
+            return
+        old = self.names.get(label)
+        if old == name:
+            return
+        if old and difflib.SequenceMatcher(None, old, name).ratio() >= 0.6:
+            return  # another spelling of the same name ("SAJAD" / "SAJJAD" / "AJAD"): keep the first
+        self.names[label] = name
+        if old:
+            # A clearly different name at the same direction: usually two people on the same side
+            # (direction can't tell them apart), so say so loudly.
+            print(f"    name changed: {label} = {name} (was {old}; same direction as another person?)")
+        else:
+            print(f"    name learned: {label} = {name}")
+
+    def display(self, label):
+        """What to show for a person: their learned name, else the ?/?? label."""
+        return self.names.get(label, label) if label else label
 
     def nearest(self, angle):
         """Existing person within SAME_PERSON_DEG of `angle`, or None."""
@@ -181,8 +208,11 @@ class CaptionAudio:
 
     def feed(self, mono_int16):
         frames = len(mono_int16)
-        if self.t0 is None:
-            self.t0 = time.monotonic() - frames / RATE
+        now = time.monotonic()
+        # Re-anchor the clock if audio was interrupted (mic reopened after a USB drop-out, or
+        # dropped frames): otherwise every timestamp stays behind real time for the rest of the run.
+        if self.t0 is None or abs(self.t0 + (self.samples + frames) / RATE - now) > 1.0:
+            self.t0 = now - (self.samples + frames) / RATE
         for i in range(0, frames - 319, 320):
             block = mono_int16[i:i + 320].astype("float32") / 32768.0
             t = self.t0 + (self.samples + i + 320) / RATE
@@ -210,10 +240,19 @@ async def run(key, audio, direction, people, on_ready=None):
     })
     url = f"wss://api.elevenlabs.io/v1/speech-to-text/realtime?{query}"
 
+    print("    live captions: connecting to ElevenLabs Scribe Realtime...")
+
+    async def connect():
+        try:
+            return await websockets.connect(url, additional_headers={"xi-api-key": key})
+        except TypeError:  # websockets < 14
+            return await websockets.connect(url, extra_headers={"xi-api-key": key})
+
     try:
-        ws = await websockets.connect(url, additional_headers={"xi-api-key": key})
-    except TypeError:  # websockets < 14
-        ws = await websockets.connect(url, extra_headers={"xi-api-key": key})
+        # Explicit limit so a stuck network shows up as an error instead of silence.
+        ws = await asyncio.wait_for(connect(), timeout=15)
+    except asyncio.TimeoutError:
+        raise RuntimeError("no answer from ElevenLabs within 15 s (internet/hotspot?)")
 
     # Drop audio queued while we weren't connected (e.g. during a reconnect).
     while not audio.queue.empty():
@@ -251,10 +290,12 @@ async def run(key, audio, direction, people, on_ready=None):
             # Option B (chosen): just the words; the yellow band shows who is talking now.
             # Past text carries no speaker tags, so nothing can be wrongly attributed.
             shown = [(None, text) for _, text in shown]
+        else:
+            shown = [(people.display(label), text) for label, text in shown]
         if shown:
             state["seq"] += 1
             threading.Thread(target=display_cue.show_live,
-                             args=(state["speaker"] or "", shown, state["where"], state["seq"]),
+                             args=(people.display(state["speaker"]) or "", shown, state["where"], state["seq"]),
                              daemon=True).start()
 
     def recent_level(seconds=0.6):
@@ -482,7 +523,11 @@ async def run(key, audio, direction, people, on_ready=None):
                 state["last_final_text"] = text
                 for label, run in runs:
                     segments.append((label, run))
-                    print(f"    {label:<4} {run}")
+                    print(f"    caption {people.display(label):<6} {run}")
+                    # Simple name rules: "I'm Sam" / "my name is Sam" names whoever said it.
+                    name = scribe.find_self_name(run, exclude=WEARER_NAMES)
+                    if name:
+                        people.set_name(label, name)
                 if heard:
                     print(heard)
                 state["partial"] = ""

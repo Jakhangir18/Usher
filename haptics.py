@@ -1,15 +1,18 @@
 """
-Two-motor temple haptics for turn-toward-speaker guidance (open-loop, no IMU).
-Drop next to SPOOT's server.py.
+Two-motor temple haptics: a soft, continuous buzz that leads the wearer toward the speaker.
+
+    target to the right  -> soft continuous buzz on the RIGHT temple
+    target to the left   -> soft continuous buzz on the LEFT temple
+    getting closer       -> the buzz gets softer, and fades out as you face them
+    overshoot            -> the buzz moves to the other temple
+    already in front     -> one short, gentle tap on both temples
+
+No IMU, so how far you've turned is estimated two ways:
+  - closed loop: guide(angle, track=...) gets fresh head-relative directions of the speaker
+    while they keep talking (the mic is on the head, so its angle changes as you turn);
+  - open loop: when there's no fresh reading, assume a natural head turn of TURN_RATE_DEG_S.
 
 Angle convention matches SPOOT: 0 = front, 90 = right, 270 = left.
-Motor code style borrowed from Touchpoint's output/motors.py (gpiozero PWM, kick-start).
-
-Patterns (each played REPEATS times):
-    in front (+/-15 deg)   1 pulse on both temples
-    slightly off (<60)     1 pulse on that side
-    to the side (<120)     2 pulses
-    behind                 3 pulses   (dead behind, exactly 180, counts as left)
 
 On a Pi 5, run with GPIOZERO_PIN_FACTORY=lgpio. In a venv, create it with
 --system-site-packages so the Pi OS lgpio package is visible.
@@ -26,19 +29,21 @@ RIGHT_GPIO = 5  # P2 in the Touchpoint/Quackhack diagram, physical pin 29
 FREQ = 200
 
 # --- Tuning -----------------------------------------------------------------
-# Micro motors are fragile: change in 0.05 steps. Raised from 0.15/0.30 so the cue is
-# easy to feel; lower LEVEL if it's too strong on the temples or the motors get warm.
-LEVEL = 0.35          # running power (Touchpoint ran these motors at 0.35 with a 1.0 kick)
-KICK_LEVEL = 0.60     # brief start-up boost to get past stall torque
-KICK_SEC = 0.04
-PULSE_SEC = 0.12      # total pulse length, including the kick
-GAP_SEC = 0.15        # between pulses in a group (long enough to count)
-REPEAT_GAP_SEC = 0.4  # between repeats of the whole pattern
-REPEATS = 2
+# Soft by design: pulses at 0.25 felt too strong, so the continuous buzz stays well below.
+SOFT_MAX = 0.20         # level when the speaker is behind you
+SOFT_MIN = 0.10         # level just before you face them (then it fades to 0)
+NUDGE_LEVEL = 0.35      # one brief start-up nudge so a micro motor spins up from standstill
+NUDGE_SEC = 0.03
+FRONT_TAP = 0.15        # already facing them: one gentle tap on both temples
+FRONT_TAP_SEC = 0.25
 
-FACING_DEG = 15
-SIDE_DEG = 60
-BEHIND_DEG = 120
+FACING_DEG = 15         # "you're facing them" window, +/- degrees
+TURN_RATE_DEG_S = 90.0  # assumed head-turn speed when there's no fresh direction reading
+REACTION_SEC = 0.4      # people need a moment to start turning; the open-loop countdown waits this long
+TIMEOUT_SEC = 5.0       # never buzz longer than this
+FADE_SEC = 0.25         # fade-out at the end
+STEP_SEC = 0.05         # how often the level/side is updated
+
 
 class _NoMotor:
     """Stand-in when GPIO isn't available, so the rest of the server keeps running."""
@@ -63,7 +68,7 @@ except Exception as exc:
     left, right = _NoMotor(LEFT_GPIO), _NoMotor(RIGHT_GPIO)
 
 # All motor writes happen under _lock and only while the job's event is unset,
-# so a cancelled pattern can never touch the motors after guide()/stop() returns.
+# so a cancelled guide can never touch the motors after guide()/stop() returns.
 _lock = threading.Lock()
 _cancel = threading.Event()
 
@@ -73,89 +78,116 @@ def _wrap(a):
     return (a + 180.0) % 360.0 - 180.0
 
 
-def pattern(rel_angle):
-    """Return (motors, pulse_count) for a SPOOT angle."""
-    err = _wrap(rel_angle)
-    if abs(err) <= FACING_DEG:
-        return (left, right), 1
-    motor = right if err > 0 else left
-    if abs(err) < SIDE_DEG:
-        return (motor,), 1
-    if abs(err) < BEHIND_DEG:
-        return (motor,), 2
-    return (motor,), 3
-
-
 def _off():
     left.off()
     right.off()
 
 
 def stop():
-    """Cancel any running pattern and turn both motors off."""
+    """Cancel any running guide and turn both motors off."""
     with _lock:
         _cancel.set()
         _off()
 
 
-def guide(rel_angle):
+def guide(rel_angle, track=None):
     """
-    Point the wearer toward a sound at rel_angle (degrees, SPOOT convention).
-    Non-blocking; a new call cancels the previous pattern immediately.
+    Lead the wearer toward a sound at rel_angle (degrees, SPOOT convention).
+
+    track: optional callable(expected_angle) -> current head-relative angle of the same speaker
+    (0..360) or None when there's no fresh reading. Lets the buzz follow the real turn.
+    Non-blocking; a new call cancels the previous guide immediately.
     """
     global _cancel
     with _lock:
         _cancel.set()
         _off()
         _cancel = cancel = threading.Event()
-    threading.Thread(target=_run, args=(rel_angle, cancel), daemon=True).start()
+    threading.Thread(target=_run, args=(rel_angle, track, cancel), daemon=True).start()
 
 
-def _set(motors, value, cancel):
+def _set(motor_values, cancel):
+    """Set several motors at once ({motor: level}). Returns False if cancelled."""
     with _lock:
         if cancel.is_set():
             return False
-        for m in motors:
-            m.value = value
+        for m, v in motor_values.items():
+            m.value = v
         return True
 
 
-def _pulse(motors, cancel):
-    """One pulse. Returns False if cancelled."""
-    if not _set(motors, KICK_LEVEL, cancel):
-        return False
-    if cancel.wait(KICK_SEC) or not _set(motors, LEVEL, cancel):
-        return False
-    stopped = cancel.wait(PULSE_SEC - KICK_SEC)
-    _set(motors, 0, cancel)
-    return not stopped
+def _level(err):
+    """Softer as you get closer: SOFT_MAX when behind, SOFT_MIN near the facing window."""
+    frac = (min(abs(err), 180.0) - FACING_DEG) / (180.0 - FACING_DEG)
+    return SOFT_MIN + (SOFT_MAX - SOFT_MIN) * max(0.0, frac)
 
 
-def _run(rel_angle, cancel):
-    motors, count = pattern(rel_angle)
-    for r in range(REPEATS):
-        if r and cancel.wait(REPEAT_GAP_SEC):
+def _run(rel_angle, track, cancel):
+    try:
+        err = _wrap(rel_angle)
+
+        if abs(err) <= FACING_DEG:
+            # Already facing them: one gentle tap on both temples.
+            if _set({left: NUDGE_LEVEL, right: NUDGE_LEVEL}, cancel) and not cancel.wait(NUDGE_SEC):
+                if _set({left: FRONT_TAP, right: FRONT_TAP}, cancel):
+                    cancel.wait(FRONT_TAP_SEC - NUDGE_SEC)
             return
-        for i in range(count):
-            if i and cancel.wait(GAP_SEC):
+
+        start = last = time.monotonic()
+        side = None
+        while time.monotonic() - start < TIMEOUT_SEC:
+            now = time.monotonic()
+            dt, last = now - last, now
+
+            # Estimate how far is left to turn: assume a natural head turn (after a reaction delay)...
+            if side is not None and now - start > REACTION_SEC:
+                step = TURN_RATE_DEG_S * dt
+                err = err - step if err > 0 else err + step
+            # ...unless the mic just heard the speaker again (closed loop).
+            if track is not None:
+                fresh = track(err % 360.0)
+                if fresh is not None:
+                    err = _wrap(fresh)
+
+            if abs(err) <= FACING_DEG:
+                break  # facing them: fade out
+
+            motor = right if err > 0 else left
+            other = left if motor is right else right
+            if motor is not side:
+                # Starting, or overshot to the other side: brief nudge to spin the motor up.
+                if not _set({motor: NUDGE_LEVEL, other: 0}, cancel) or cancel.wait(NUDGE_SEC):
+                    return
+                side = motor
+            if not _set({motor: _level(err)}, cancel) or cancel.wait(STEP_SEC):
                 return
-            if not _pulse(motors, cancel):
-                return
+
+        # Gentle fade-out instead of a hard stop.
+        if side is not None:
+            begin = _level(FACING_DEG)
+            steps = max(1, int(FADE_SEC / STEP_SEC))
+            for i in range(steps, 0, -1):
+                if not _set({side: begin * i / steps}, cancel) or cancel.wait(STEP_SEC):
+                    return
+    finally:
+        with _lock:
+            if not cancel.is_set():
+                _off()
 
 
 if __name__ == "__main__":
-    # Bench test: one of each pattern, then a mid-pattern cancel.
+    # Bench test (no speaker tracking, so it uses the open-loop turn estimate).
     try:
-        for a, label in ((0, "front"), (30, "slight right"), (90, "right"),
-                         (150, "behind right"), (300, "slight left"),
-                         (270, "left"), (200, "behind left")):
+        for a, label in ((0, "front: one gentle tap on both"), (40, "slight right: short soft buzz"),
+                         (90, "right: ~1 s soft buzz"), (270, "left: ~1 s soft buzz"),
+                         (180, "behind: ~2 s, softens as it goes")):
             print(f"guide({a})  {label}")
             guide(a)
-            time.sleep(2.5)
-        print("guide(150) cancelled after 0.3 s by guide(270)")
-        guide(150)
-        time.sleep(0.3)
-        guide(270)
+            time.sleep(3.0)
+        print("guide(120) cancelled after 0.5 s by guide(300)")
+        guide(120)
+        time.sleep(0.5)
+        guide(300)
         time.sleep(2.5)
     finally:
         stop()

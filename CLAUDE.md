@@ -17,11 +17,12 @@ Team of 4, hackathon build. Repo: https://github.com/Jakhangir18/Usher
 - 2 motors on the temples (left = GPIO4 / pin 7 / "P1", right = GPIO5 / pin 29 / "P2", BCM numbering), wired like Quackhack/Touchpoint;
   micro vibration motors (red/blue leads),
   each switched by a MOSFET trigger module as in Touchpoint's schematic (motor between VCC and the module, Pi pin → module signal).
-- **Motors are fragile; change power in small steps.** `LEVEL` 0.35, `KICK_LEVEL` 0.60 in `haptics.py` (raised from
-  0.15/0.30 at the user's request; Touchpoint ran the same motors at 0.35 with a 1.0 kick). Tested 2026-10-03:
-  0.5 is too strong on the temples, **0.35 is our level**. `motor_test.py` ramps to 0.35, hard cap 0.4.
-  Raise in 0.05 steps only if needed (KICK_LEVEL first if it won't spin). Power motors from 3.3 V, not 5 V, if they're ~3 V rated.
-- No IMU. Guidance is open-loop. If one is added later, BNO055 is preferred (on-chip fusion, gives heading directly).
+- **Motors are fragile; change power in small steps.** History: pulse patterns at 0.35 then 0.25 felt **too strong**;
+  the user wants a **soft continuous buzz** instead (see `haptics.py` below: 0.10–0.20, one 0.35 nudge for 0.03 s to
+  spin up). `motor_test.py` buzzes at a fixed 0.25 (no ramp), hard cap 0.4.
+  Power motors from 3.3 V, not 5 V, if they're ~3 V rated (also keeps motor current off the USB/5V rail).
+- No IMU. The buzz follows the speaker's live direction while they keep talking (mic is head-mounted), otherwise
+  assumes a 90°/s head turn. If an IMU is added later, BNO055 is preferred (on-chip fusion, gives heading directly).
 
 ## Code base
 Built on two of a teammate's prior hackathon repos:
@@ -32,15 +33,15 @@ Built on two of a teammate's prior hackathon repos:
   `output/motors.py` = gpiozero PWM motor control with kick-start. Pattern reused in `haptics.py`.
 
 ## Our additions
-- `haptics.py` (in this repo): two-motor turn guidance, open-loop.
-  - `guide(rel_angle)` is non-blocking; a new call cancels the old pattern immediately. `stop()` cancels and turns both motors off.
+- `haptics.py` (in this repo): **soft continuous buzz that leads the wearer toward the speaker** (replaced the pulse
+  counts, which felt too strong). Tested on the Pi in server.py ("Hello Jax" buzzes the correct side).
+  - `guide(rel_angle, track=None)` is non-blocking; a new call cancels the old one immediately. `stop()` turns both off.
   - Angle convention matches SPOOT: 0 = front, 90 = right, 270 = left.
-  - Discrete pulse counts (easier to read on the temples than intensity changes), played twice (~1.7 s max):
-    - in front (±15°): 1 pulse, both temples
-    - <60°: 1 pulse on that side
-    - <120°: 2 pulses
-    - behind: 3 pulses
-  - Single fixed intensity `LEVEL` (0.35) with a short `KICK_LEVEL` (0.60) start-up boost, adjustable at the top of the file.
+  - Continuous buzz on the side to turn toward, softer as you get closer (`SOFT_MAX` 0.20 → `SOFT_MIN` 0.10), gentle
+    fade-out when facing (±15°), switches temple on overshoot, gives up after 5 s. Already in front: one 0.25 s tap at
+    0.15 on both. One brief 0.35 nudge (0.03 s) when a motor starts, so it spins up without a jolt.
+  - Remaining turn: from `track(expected)` (server's `_track_speaker`: speech DOA in the last 0.4 s, within 60° of
+    where the speaker should be) while the speaker keeps talking; otherwise assumes `TURN_RATE_DEG_S` 90°/s.
   - Dead behind (exactly 180°) counts as left.
   - If GPIO can't be opened (dev laptop, missing lgpio) it falls back to dummy motors with a warning, so `server.py` still runs.
   - Bench test: `python haptics.py`
@@ -171,14 +172,20 @@ Leave `GEMINI_API_KEY` empty for now. Gemini is too slow for the core turn loop 
 - Test DOA in a noisy hall, not just a quiet room (echoes, false name triggers).
 
 ## One program for the demo (`python server.py`)
-"Hello Jax" (Whisper, ch2) → motors (turn pattern, LEVEL 0.35) + arrow → catch-up text; live captions (Scribe Realtime,
+"Hello Jax" (Whisper, ch2) → motors (soft continuous guiding buzz) + arrow → catch-up text; live captions (Scribe Realtime,
 ch0, `LIVE_CAPTIONS=1`) run alongside via `live_captions.run()`, fed from the same mic stream (`_audio_callback` →
 `CaptionAudio.feed`) and the server's DOA history (`_ServerDirection`), reconnecting on their own.
 **Decision: motors only fire for "Hello Jax"**, never for live captions (fewer chances for wrong cues).
 `display_cue` priority: `show()` / `show_caption()` own the screen; `show_live()` is skipped meanwhile.
 `live_captions` is imported after `.env` is loaded (it reads settings at import). Details: [ELEVENLABS.md](ELEVENLABS.md).
 
-## Catch me up (built in server.py, not yet tested on the Pi)
+First full run (2026-10-03): live captions connected, "Hey Jax" buzzed left twice (old pulse version), catch-up worked (Scribe 0.8–0.9 s,
+3 speakers with directions). Then the mic dropped off USB (`USBError 19 No such device`): DOA reconnected but the audio
+stream died silently, so Whisper re-transcribed the same frozen 4 s and captions disconnected. Likely a loose cable or a
+power dip from the motors on the Pi's 5V rail. Fixed in code: audio watchdog in `wake_loop` (no audio for 2 s → clear
+buffer, re-scan PortAudio devices, reopen the stream). Hardware: motor modules on 3.3V, official 5V/5A supply, firm cable.
+
+## Catch me up (built in server.py, tested once on the Pi: works)
 On a wake, after the arrow: `_catch_up()` sends the last `CATCHUP_SEC` (30 s; audio ring buffer sized for it) to batch
 Scribe via `scribe.py` (diarize, word timestamps), gives each speaker a direction (circular mean of the speech DOA
 readings during their words, `_speaker_directions`), picks the caller (last speaker with a name word, else nearest the

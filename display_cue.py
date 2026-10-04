@@ -28,7 +28,7 @@ CAPTION_LINES = 3    # body lines that fit in the blue area
 CAPTION_LINE_H = 16
 PAGE_SEC = 2.5       # how long each caption page stays up
 
-# Same thresholds as haptics.py, so screen and motors agree.
+# FACING_DEG matches haptics.py (where the buzz stops); BEHIND_DEG is display-only.
 FACING_DEG = 15
 BEHIND_DEG = 120
 
