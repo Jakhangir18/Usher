@@ -73,7 +73,8 @@ LIVE_SPEAKER_TAGS = os.environ.get("LIVE_SPEAKER_TAGS", "0").strip() == "1"
 
 # The wearer's own name is never learned as someone else's ("I'm Jax" isn't a new person).
 WEARER_NAMES = [os.environ.get("USER_NAME", "Jax")] + [
-    a.strip() for a in os.environ.get("USER_NAME_ALIASES", "").split(",") if a.strip()]
+    a.strip() for a in (os.environ.get("USER_NAME_ALIASES", "") + "," + os.environ.get("WAKE_EXTRA_NAMES", "jack")).split(",")
+    if a.strip()]  # includes "jack": accepted as Jax for the wake phrase, so never someone else's name
 
 # Live captions read the chip's processed beam (ch0): in testing it kept nearby voices >= 0.034
 # with background below 0.02, while the raw mic (ch2) put the second speaker under the cut-off.
@@ -153,17 +154,22 @@ class People:
         self.angles = {}   # label -> running mean angle
         self.names = {}    # label -> learned name ("??" -> "SAM")
 
-    def set_name(self, label, name):
+    def set_name(self, label, name, force=False):
+        """force=True (Gemini, which reads the whole conversation) may correct a spelling."""
         name = name.upper()[:10]
         if label not in self.angles:
             return
         old = self.names.get(label)
         if old == name:
             return
-        if old and difflib.SequenceMatcher(None, old, name).ratio() >= 0.6:
-            return  # another spelling of the same name ("SAJAD" / "SAJJAD" / "AJAD"): keep the first
+        if old and not force:
+            # The quick "I'm Sam" rule only names people who have no name yet; changing a name is
+            # Gemini's job (it reads the whole conversation). Otherwise rules and Gemini fight.
+            return
         self.names[label] = name
-        if old:
+        if old and difflib.SequenceMatcher(None, old, name).ratio() >= 0.6:
+            print(f"    name corrected: {label} = {name} (was {old})")
+        elif old:
             # A clearly different name at the same direction: usually two people on the same side
             # (direction can't tell them apart), so say so loudly.
             print(f"    name changed: {label} = {name} (was {old}; same direction as another person?)")
@@ -224,10 +230,17 @@ class CaptionAudio:
             self.loop.call_soon_threadsafe(self.queue.put_nowait, mono_int16.tobytes())
 
 
-async def run(key, audio, direction, people, on_ready=None):
+async def run(key, audio, direction, people, on_ready=None, on_text=None, publish=None):
     """
     One Scribe Realtime session: stream `audio` (CaptionAudio), show captions on the display.
     `direction` needs current(), silent_for(), angles_between(); `people` is a People.
+
+    on_text(text, label) -> bool: called with each live guess and finished piece (server.py uses
+        it as a fast "Hello Jax" trigger). Return True if it acted; it's then not called again
+        for the same piece, so one "Hello Jax" fires once.
+    publish(segment_id, label, text, is_final): every caption update, for the companion app
+        (partial guesses with is_final=False, then the finished text with the same segment_id).
+
     Returns/raises when the connection ends; callers decide whether to reconnect.
     """
     query = urllib.parse.urlencode({
@@ -273,6 +286,8 @@ async def run(key, audio, direction, people, on_ready=None):
         "piece_start": 0.0,    # audio seconds when the current piece's first words arrived
         "seq": 0,              # display frame number, so late frames don't overwrite newer ones
         "last_draw": 0.0,
+        "segment": 0,          # id of the piece being spoken (for the companion app)
+        "woke": False,         # on_text already acted on this piece
     }
     segments = collections.deque(maxlen=KEEP_SEGMENTS)  # finished (label, text)
 
@@ -495,6 +510,15 @@ async def run(key, audio, direction, people, on_ready=None):
                 if state["partial"] and not state["dirty"]:
                     state["piece_start"] = audio.samples / RATE  # first words of a new piece
                 state["dirty"] = bool(state["partial"])
+                if state["partial"]:
+                    # Live guesses arrive ~0.2 s after speech: the fastest "Hello Jax" signal.
+                    # Same loudness gate as the shown text: distant "hey Jack" mustn't buzz.
+                    if (on_text and not state["woke"] and recent_level() >= CAPTION_MIN_RMS
+                            and on_text(state["partial"], state["speaker"])):
+                        state["woke"] = True
+                    if publish and recent_level() >= CAPTION_MIN_RMS:
+                        publish(str(state["segment"]), state["speaker"] or "?",
+                                scribe.clean_text(state["partial"]), False)
                 redraw()
             elif kind == "committed_transcript":
                 # Provisional: labelled with whoever was talking at the commit. Replaced by the
@@ -516,18 +540,38 @@ async def run(key, audio, direction, people, on_ready=None):
                     traceback.print_exc()  # never let one message kill the captions
                     runs, heard = None, None
                 if runs is None:
-                    continue  # no usable timestamps: keep the provisional version
+                    # No usable timestamps: keep the provisional version, but still finish the piece
+                    # (send it to the app, next piece gets a new id, caption wake re-armed).
+                    if publish and state["provisional"] and segments:
+                        publish(str(state["segment"]), segments[-1][0], segments[-1][1], True)
+                    elif publish:  # nothing new to show: just clear the app's "speaking…" line
+                        publish(str(state["segment"]), state["speaker"] or "?", "", True)
+                    state["provisional"] = False
+                    state["segment"] += 1
+                    state["woke"] = False
+                    state["partial"] = ""
+                    redraw(force=True)
+                    continue
                 if state["provisional"] and segments:
                     segments.pop()
                 state["provisional"] = False
                 state["last_final_text"] = text
-                for label, run in runs:
+                if on_text and not state["woke"] and runs:
+                    on_text(" ".join(r for _, r in runs), info[0])  # in case the live guesses missed it
+                for i, (label, run) in enumerate(runs):
                     segments.append((label, run))
                     print(f"    caption {people.display(label):<6} {run}")
                     # Simple name rules: "I'm Sam" / "my name is Sam" names whoever said it.
                     name = scribe.find_self_name(run, exclude=WEARER_NAMES)
                     if name:
                         people.set_name(label, name)
+                    if publish:
+                        seg = str(state["segment"]) if i == 0 else f"{state['segment']}.{i}"
+                        publish(seg, label, run, True)
+                if publish and not runs:  # all of it was quiet chatter: clear the app's "speaking…" line
+                    publish(str(state["segment"]), state["speaker"] or "?", "", True)
+                state["segment"] += 1
+                state["woke"] = False
                 if heard:
                     print(heard)
                 state["partial"] = ""

@@ -22,6 +22,7 @@ from flask_cors import CORS
 import display_cue
 import doa_reader
 import haptics
+import requests
 import scribe
 
 
@@ -152,11 +153,14 @@ DOA_POLL_SEC = float(os.environ.get("DOA_POLL_SEC", "0.05"))
 _doa_history = collections.deque(maxlen=1500)  # ~75 s of speech at 20 readings/s (catch-up needs 30 s)
 
 
+_doa_stop = threading.Event()   # set on shutdown so the USB reader closes before Python exits
+
+
 def _doa_poll_loop():
     global _doa_azimuth_deg
 
     reader = None
-    while True:
+    while not _doa_stop.is_set():
         try:
             if reader is None:
                 reader = doa_reader.open_doa(DOA_SOURCE, XVF_HOST)
@@ -177,8 +181,22 @@ def _doa_poll_loop():
 
         time.sleep(DOA_POLL_SEC)
 
+    # Shutting down: release the USB device ourselves. Leaving it to interpreter teardown
+    # while a read is in flight caused "Bus error" on Ctrl+C.
+    if reader is not None:
+        try:
+            reader.close()
+        except Exception:
+            pass
 
-threading.Thread(target=_doa_poll_loop, daemon=True).start()
+
+_doa_thread = threading.Thread(target=_doa_poll_loop, daemon=True)
+_doa_thread.start()
+
+
+def _stop_doa():
+    _doa_stop.set()
+    _doa_thread.join(timeout=1.0)
 
 app = Flask(__name__)
 CORS(app)
@@ -455,9 +473,28 @@ CATCHUP_ARROW_SEC = 2.5   # let the arrow stay up at least this long before the 
 LIVE_CAPTIONS = os.environ.get("LIVE_CAPTIONS", "1").strip() == "1"
 CAPTION_AUDIO_CHANNEL = int(os.environ.get("CAPTION_AUDIO_CHANNEL", "0"))
 
-_caption_audio = None   # live_captions.CaptionAudio, fed from _audio_callback when captions are on
+# Web app "ideal version" (refine.py): after each live caption finishes, batch Scribe re-transcribes
+# the audio since the last voice-ID line (AUDIO_CHANNEL, at most REFINE_WINDOW_SEC) with speakers
+# told apart by voice, and the app swaps its faint live text for those lines once the speaker's turn
+# ends. Only runs while the app is open (billed per audio second sent); the headset's OLED keeps the
+# instant live captions.
+REFINE_CAPTIONS = os.environ.get("REFINE_CAPTIONS", "1").strip() == "1"
+REFINE_WINDOW_SEC = float(os.environ.get("REFINE_WINDOW_SEC", "20"))
+REFINE_MIN_RMS = float(os.environ.get("REFINE_MIN_RMS", "0.005"))  # quieter turns = distant chatter, dropped
+REFINE_MIN_WINDOW_SEC = 4.0  # shortest audio sent (diarization needs some context)
+REFINE_OVERLAP_SEC = 3.0  # re-send this much before the last line sent, for voice matching
+REFINE_DELAY_SEC = 0.3    # after a live caption finishes, before sending (lets the last word land)
+REFINE_RETRY_SEC = 1.5    # someone still talking at the end of the audio: look again this soon
+REFINE_MAX_RETRIES = 6    # ...at most this many times per new live caption
+REFINE_MAX_VOICES = int(os.environ.get("REFINE_MAX_VOICES", "6"))  # most voices it will tell apart (people at the table + a couple)
+REFINE_COMMIT_LAG = 1.5   # live captions commit up to ~1.5 s after the words (0.7 s silence + network)
+
+_caption_audio = None  # live_captions.CaptionAudio, fed from _audio_callback when captions are on
 _live_people = None     # live_captions.People shared with catch-up so both use the same ?/?? labels
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+# gemini-2.0-flash (SPOOT's old default) has been shut down; 3.5 Flash-Lite is fast and cheap for short JSON.
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
+# How often (at most) to ask Gemini for names + a conversation summary, when there are new captions.
+GEMINI_SUMMARY_SEC = float(os.environ.get("GEMINI_SUMMARY_SEC", "12"))
 GEMINI_TIMEOUT_SEC = float(os.environ.get("GEMINI_TIMEOUT_SEC", "3.0"))
 GEMINI_MIN_INTERVAL_SEC = float(os.environ.get("GEMINI_MIN_INTERVAL_SEC", "4.0"))
 GEMINI_BACKOFF_BASE_SEC = float(os.environ.get("GEMINI_BACKOFF_BASE_SEC", "30.0"))
@@ -484,7 +521,7 @@ def rms(audio_array):
     return float(np.sqrt(np.mean(audio_array ** 2)))
 
 
-_BUFFER_TOTAL_SEC = max(WAKE_WINDOW_SEC, CATCHUP_SEC) + 1.0
+_BUFFER_TOTAL_SEC = max(WAKE_WINDOW_SEC, CATCHUP_SEC, REFINE_WINDOW_SEC if REFINE_CAPTIONS else 0) + 1.0
 _MAX_BLOCKS = int(_BUFFER_TOTAL_SEC * SAMPLE_RATE / BLOCKSIZE) + 4
 
 _audio_blocks = collections.deque(maxlen=_MAX_BLOCKS)
@@ -666,8 +703,16 @@ def _snapshot_buffer(seconds):
     if not blocks:
         return np.zeros(0, dtype='float32')
 
-    audio = np.concatenate(blocks)
+    # Only join the tail blocks we need (the buffer holds ~31 s for catch-up; most callers
+    # want 0.1-4 s, many times a second).
     needed = int(seconds * SAMPLE_RATE)
+    tail, have = [], 0
+    for block in reversed(blocks):
+        tail.append(block)
+        have += len(block)
+        if have >= needed:
+            break
+    audio = np.concatenate(tail[::-1])
 
     if len(audio) > needed:
         audio = audio[-needed:]
@@ -1490,13 +1535,9 @@ async def _catch_up(wake_angle, wake_time):
         # arrow still points at them). Without live captions, Scribe's own ?/?? is fine.
         label = labels[caller]
         if _live_people is not None:
-            # Simple name rules on the voice-identified turns too ("I'm Sam" -> that person = SAM).
-            for speaker, _, _, ws in turns:
-                name = scribe.find_self_name(" ".join(scribe.clean_words(ws)),
-                                             exclude=[USER_NAME, *USER_NAME_ALIASES])
-                person = _live_people.nearest(directions[speaker]) if speaker in directions else None
-                if name and person:
-                    _live_people.set_name(person, name)
+            # No name learning here: catch-up directions span 30 s during which the wearer turns
+            # (that's what "Hello Jax" makes them do), so voice->direction->label pinned names on
+            # the wrong person and fought Gemini. Names come from live captions + Gemini.
             person = _live_people.nearest(directions[caller]) if caller in directions else None
             label = _live_people.display(person) or ""
         display_cue.show_caption_async(label, text, where)
@@ -1531,6 +1572,369 @@ class _ServerDirection:
             return [a for t, a in _doa_history if start <= t <= end]
 
 
+def _wake(angle, source, when=None):
+    """
+    Fire the "Hello Jax" response (motors + arrow + catch-up) unless one just fired. True if fired.
+    `when`: the time the phrase was captured (Whisper passes its window's capture time, so its
+    0.8-1.6 s processing jitter can't let the same phrase slip past the cooldown).
+    """
+    global _last_wake
+    now = time.monotonic()
+    when = now if when is None else when
+    if when - _last_wake < WAKE_COOLDOWN_SEC:
+        return False
+    _last_wake = when
+    haptics.guide(angle, track=_track_speaker)
+    display_cue.show_async(angle)
+    print(f"[a={angle:.1f}°] wake phrase ({source}): BUZZ toward {display_cue.direction(angle)} ({angle:.0f} deg)")
+    if CATCHUP_SEC and ELEVENLABS_API_KEY:
+        _spawn(_catch_up(angle, now))
+    return True
+
+
+def _caption_wake(text, label):
+    """
+    ElevenLabs as a fast wake trigger: Scribe's live guess shows "Hello Jax" ~0.2 s after it's
+    said, sooner than Whisper's ~1-2 s. Same greeting+name rule and shared cooldown, so one
+    "Hello Jax" fires once whichever hears it first; Whisper still covers being offline.
+    """
+    if not wake_phrase_detected(text):
+        return False
+    angle = _live_people.angles.get(label) if (_live_people is not None and label) else None
+    if angle is None:
+        now = time.monotonic()
+        angle = _direction_during([(now - 1.5, now)])
+    _wake(angle, "ElevenLabs")
+    # True even if the cooldown stopped it (Whisper fired first): this piece's later, longer
+    # guesses still contain the phrase and must not buzz again once the cooldown runs out.
+    return True
+
+
+# Web app (frontend/) contract: {type:"caption", session_id, segment_id, speaker_id, speaker_label,
+#  text, is_final, angle, timestamp, source} for live captions, and {type:"refined", ...same,
+#  start, end, replaces:[segment_id...]} for voice-identified lines that replace them.
+# New clients get {type:"snapshot", refine, captions:[...]} of recent finished lines.
+_SESSION_ID = f"usher-{int(time.time())}"
+_recent_captions = collections.deque(maxlen=200)
+_live_unrefined = collections.deque(maxlen=200)  # (segment_id, monotonic time) live finals not yet replaced
+_refine_wake = None    # asyncio.Event set when a live caption finishes (created in main)
+_refiner = None        # refine.Refiner while the refine loop runs
+_refined_count = 0     # voice-identified lines sent so far (numbers their segment ids)
+_live_final_count = 0  # finished live caption pieces so far (new speech for the refine loop)
+
+
+def _publish_caption(segment_id, label, text, is_final):
+    angle = _live_people.angles.get(label) if (_live_people is not None and label) else None
+    payload = {
+        "type": "caption",
+        "session_id": _SESSION_ID,
+        "segment_id": f"live-{segment_id}",
+        "speaker_id": label or "?",
+        "speaker_label": (_live_people.display(label) if _live_people is not None else label) or "?",
+        "text": text,
+        "is_final": bool(is_final),
+        "angle": None if angle is None else round(angle, 1),
+        "timestamp": time.time(),
+        "source": "scribe_v2_realtime",
+    }
+    if is_final and text:  # an empty final only clears the app's "speaking…" line
+        global _transcript_count, _live_final_count
+        _live_final_count += 1
+        _recent_captions.append(payload)
+        _transcript_log.append((payload["segment_id"], label or "?", text, angle))
+        _transcript_count += 1
+        if _refine_wake is not None:
+            _live_unrefined.append((payload["segment_id"], time.monotonic()))
+            _refine_wake.set()
+    _spawn(broadcast(payload))
+
+
+def _drop_replaced(replaced):
+    """Remove live lines that a refined line replaced from the snapshot and Gemini's transcript."""
+    if not replaced:
+        return
+    kept = [c for c in _recent_captions if c["segment_id"] not in replaced]
+    _recent_captions.clear()
+    _recent_captions.extend(kept)
+    kept = [line for line in _transcript_log if line[0] not in replaced]
+    _transcript_log.clear()
+    _transcript_log.extend(kept)
+
+
+def _publish_refined(vid, start, end, text, pending):
+    """Send one voice-identified line; it replaces the live lines committed during it."""
+    global _transcript_count, _refined_count
+    voice = _refiner.voices[vid]
+    if voice.name is None:  # "I'm Sam" names the voice (Gemini can correct it later)
+        name = scribe.find_self_name(text, exclude=[USER_NAME, *USER_NAME_ALIASES, *WAKE_EXTRA_NAMES])
+        if name:
+            voice.name = name
+    # Live pieces committed by the end of this line (allowing for commit lag), but not ones that
+    # belong to the next, still-running turn.
+    cutoff = end + REFINE_COMMIT_LAG
+    if pending is not None:
+        cutoff = min(cutoff, pending + 0.3)
+    replaced = {seg for seg, t in _live_unrefined if t <= cutoff}
+    kept = [(seg, t) for seg, t in _live_unrefined if t > cutoff]
+    _live_unrefined.clear()
+    _live_unrefined.extend(kept)
+
+    angle = _circular_mean(_angles_during([(start, end)], pad=0.1))
+    to_wall = time.time() - time.monotonic()
+    _refined_count += 1
+    payload = {
+        "type": "refined",
+        "session_id": _SESSION_ID,
+        "segment_id": f"voice-{_refined_count}",
+        "speaker_id": vid,
+        "speaker_label": voice.label,
+        "text": text,
+        "is_final": True,
+        "angle": None if angle is None else round(angle, 1),
+        "start": round(start + to_wall, 2),
+        "end": round(end + to_wall, 2),
+        "replaces": sorted(replaced),
+        "timestamp": time.time(),
+        "source": "scribe_v2",
+    }
+    _drop_replaced(replaced)
+    _recent_captions.append(payload)
+    _transcript_log.append((payload["segment_id"], vid, text, angle))
+    _transcript_count += 1
+    _spawn(broadcast(payload))
+
+
+def _refine_angle(spans):
+    """refine.py's angle_of: mean speech direction during [(start, end), ...] monotonic spans, or None."""
+    return _circular_mean(_angles_during(spans, pad=0.1)) if spans else None
+
+
+async def _refine_loop():
+    """
+    Voice-identified lines for the web app: after each live caption finishes (and again shortly
+    after, while someone is still mid-sentence), batch-transcribe the audio since the last line sent with
+    reference clips of known voices (refine.py) and publish the finished turns. Never raises.
+    """
+    global _refiner
+    import live_captions  # already imported by main() (refine only runs with live captions)
+    import refine
+    _refiner = refine.Refiner(SAMPLE_RATE, max_voices=REFINE_MAX_VOICES)
+    delay, backoff, retries, seen = REFINE_DELAY_SEC, 0.0, 0, _live_final_count
+    print(f"    refine: on (voice-identified lines for the web app, up to {REFINE_WINDOW_SEC:.0f}s per request)")
+    while True:
+        await _refine_wake.wait()
+        await asyncio.sleep(delay + backoff)
+        _refine_wake.clear()  # triggers that arrived while waiting are covered by this request
+        delay = REFINE_DELAY_SEC
+        if seen != _live_final_count:  # new speech since the last request
+            seen, retries = _live_final_count, 0
+        now = time.monotonic()
+        if not CLIENTS:
+            # Nobody watching: don't pay for it, and don't re-send this stretch when a page opens
+            # (it gets the live lines in its snapshot instead).
+            _live_unrefined.clear()
+            _refiner.done_until, _refiner.prev = now, []
+            continue
+        # Audio since the last line sent (minus an overlap the voice matching uses), at most
+        # REFINE_WINDOW_SEC: billed per audio second, so don't re-send what's already done.
+        since = max(now - REFINE_WINDOW_SEC, _refiner.done_until - REFINE_OVERLAP_SEC)
+        window = _snapshot_buffer(max(REFINE_MIN_WINDOW_SEC, now - since))
+        window_start = now - len(window) / SAMPLE_RATE
+        if len(window) < SAMPLE_RATE:
+            continue
+        if window_start > _refiner.done_until:
+            # A gap (errors/backoff, or one long held turn): speech before the window will never be
+            # voice-identified, so leave its live lines alone (the app keeps them) instead of
+            # letting a later line "replace" text it never contained.
+            # A live piece can hold up to MAX_PIECE_SEC of speech before it commits: keep those too
+            # (a duplicate line beats deleted words).
+            gone_before = window_start + live_captions.MAX_PIECE_SEC + REFINE_COMMIT_LAG
+            kept = [(seg, t) for seg, t in _live_unrefined if t >= gone_before]
+            _live_unrefined.clear()
+            _live_unrefined.extend(kept)
+            _refiner.done_until = window_start
+        clip, spans, offset = _refiner.build_clip(window)
+        try:
+            result, secs = await asyncio.to_thread(
+                scribe.transcribe, scribe.wav_bytes(clip, SAMPLE_RATE), ELEVENLABS_API_KEY)
+            backoff = 0.0
+            turns, pending = _refiner.process(result, spans, offset, window, window_start,
+                                              min_rms=REFINE_MIN_RMS, angle_of=_refine_angle)
+            for vid, start, end, text in turns:
+                _publish_refined(vid, start, end, text, pending)
+        except Exception as exc:
+            backoff = min(30.0, backoff * 2 or 5.0)
+            print(f"WARNING refine: {exc!r}; retrying in {backoff:.0f}s (live captions unaffected)")
+            if retries < REFINE_MAX_RETRIES:  # capped too: a bug after a billed request mustn't re-send forever
+                retries += 1
+                _refine_wake.set()
+            continue
+        if turns or pending is not None or _refiner.dropped:
+            print(f"    refine: {secs:.1f}s for {len(clip) / SAMPLE_RATE:.0f}s audio, {len(turns)} line(s), "
+                  f"{len(_refiner.voices)} voice(s)"
+                  + (f", {_refiner.dropped} quiet part(s) dropped" if _refiner.dropped else "")
+                  + (", waiting for a turn to finish" if pending is not None else ""))
+        # Someone still talking at the end: look again soon, but only a few times without a new
+        # live caption (background chatter on the raw mic shouldn't keep requests going forever).
+        if pending is not None and retries < REFINE_MAX_RETRIES:
+            retries += 1
+            delay = REFINE_RETRY_SEC
+            _refine_wake.set()
+
+
+# =========================
+# Gemini: names + conversation summary (background, never on the wake path)
+# =========================
+
+_transcript_log = collections.deque(maxlen=200)   # finished lines: (segment_id, label, text, angle)
+_transcript_count = 0                             # total pieces ever logged (to spot new ones)
+_last_summary = None                              # last {type:"summary"} payload, for new app clients
+
+GEMINI_PROMPT = """You help a deaf-blind headset wearer named Jax follow a conversation.
+Below are recent captions. Each line starts with a speaker label in brackets, then their direction
+relative to Jax. "V1", "V2", ... are people told apart by voice (reliable). "?", "??", "???" are
+people told apart by direction only (the newest lines, not yet voice-checked; they may be one of the
+V people). A learned name may follow the label after "/".
+
+Task 1, names: for each label, give that person's first name ONLY if the conversation makes it clear
+(they introduce themselves, someone introduces them, or others address them by name). Use the most
+likely correct spelling. Never answer "Jax" or a similar spelling like "Jack" or "Jacks": that is the
+wearer, and captions often mishear Jax as Jack. Leave out labels you are unsure about.
+
+Task 2, summary: 2 to 4 short bullet points (at most 14 words each) of what is being discussed. Put
+anything said to or about Jax first. Refer to people by name if known, otherwise by direction
+(e.g. "the person on the left").
+
+Return only JSON: {{"names": {{"<label>": "<Name>"}}, "summary": ["...", "..."]}}
+
+Captions:
+{captions}"""
+
+
+def _speaker_name(label):
+    """Display name for a direction label (?/??) or a voice id (V1/V2)."""
+    if _refiner is not None and label in _refiner.voices:
+        return _refiner.voices[label].label
+    return _live_people.display(label) if _live_people is not None else label
+
+
+def _gemini_prompt(lines):
+    out = []
+    for _, label, text, angle in lines:
+        shown = _speaker_name(label)
+        if _refiner is not None and label in _refiner.voices and _refiner.voices[label].name is None:
+            shown = label  # "Speaker 2" adds nothing for Gemini
+        who = label if shown == label else f"{label}/{shown}"
+        where = display_cue.direction(angle) if angle is not None else "unknown direction"
+        out.append(f"[{who}, {where}] {text}")
+    return GEMINI_PROMPT.format(captions="\n".join(out))
+
+
+def _ask_gemini(prompt):
+    """One generateContent call (blocking; run in a thread). Returns the parsed JSON object."""
+    r = requests.post(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
+        headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
+        json={"contents": [{"parts": [{"text": prompt}]}],
+              "generationConfig": {"responseMimeType": "application/json", "temperature": 0.2}},
+        timeout=15,
+    )
+    if r.status_code != 200:
+        hint = " (check GEMINI_MODEL)" if r.status_code == 404 else ""
+        raise RuntimeError(f"HTTP {r.status_code}{hint}: {r.text[:200]}")
+    text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+    return json.loads(text)
+
+
+async def _gemini_loop():
+    """Every GEMINI_SUMMARY_SEC, if new captions finished: learn names + refresh the summary."""
+    global _last_summary
+    seen, backoff = 0, 0.0
+    wearer = {USER_NAME.lower(), *USER_NAME_ALIASES, *WAKE_EXTRA_NAMES}  # all spellings of the wearer's name
+    while True:
+        await asyncio.sleep(GEMINI_SUMMARY_SEC + backoff)
+        if _live_people is None or _transcript_count == seen:
+            continue
+        seen = _transcript_count
+        try:
+            result = await asyncio.to_thread(_ask_gemini, _gemini_prompt(list(_transcript_log)[-40:]))
+            backoff = 0.0
+        except Exception as exc:
+            backoff = min(60.0, backoff * 2 or 15.0)  # e.g. rate limited: slow down
+            print(f"WARNING gemini: {exc}; next try in {GEMINI_SUMMARY_SEC + backoff:.0f}s")
+            continue
+
+        # Gemini's JSON isn't guaranteed to match the schema: a wrong shape must not end this task.
+        result = result if isinstance(result, dict) else {}
+        names = result.get("names") if isinstance(result.get("names"), dict) else {}
+        summary = result.get("summary") if isinstance(result.get("summary"), list) else []
+        for label, name in names.items():
+            if not (isinstance(name, str) and name.strip() and name.strip().lower() not in wearer):
+                continue
+            if _refiner is not None and label in _refiner.voices:
+                _refiner.voices[label].name = name.strip()
+            elif label in _live_people.angles:
+                _live_people.set_name(label, name.strip(), force=True)  # Gemini knows the spelling
+        # Undo any wearer-name labels learned earlier (e.g. "I am Jack" before this fix).
+        for label, name in list(_live_people.names.items()):
+            if name.lower() in wearer:
+                del _live_people.names[label]
+        voices = list(_refiner.voices.values()) if _refiner is not None else []
+        for voice in voices:
+            if voice.name and voice.name.lower() in wearer:
+                voice.name = None
+        bullets = [str(b) for b in summary if b][:4]
+        _last_summary = {
+            "type": "summary",
+            "bullets": bullets,
+            "names": {**{label: _live_people.display(label) for label in _live_people.angles},
+                      **{v.id: v.label for v in voices}},
+            "model": GEMINI_MODEL,
+            "timestamp": time.time(),
+        }
+        print(f"    gemini: summary ({len(bullets)} points), people {_last_summary['names']}")
+        await broadcast(_last_summary)
+
+
+SOUND_EVENT_SEC = 0.1   # how often loud-sound events go to the web app (for its noise reticle)
+SOUND_MIN_READINGS = 2  # speech direction readings needed in the last 0.3 s
+SOUND_MIN_AGREEMENT = 0.8  # how tightly they must agree (1 = identical; 0.8 ≈ within ~35°)
+
+
+async def _sound_event_loop():
+    """
+    For the web app's noise reticle: ~10x a second, if it's loud enough AND the chip hears speech
+    from a consistent direction, send {type:"sound", angle, level, speech, timestamp}.
+    Without the speech flag the chip's direction readings jump between beams at random, which drew
+    pings in random places (first hardware test), so bangs and hum don't ping at all.
+    Only sent while an app is connected.
+    """
+    while True:
+        await asyncio.sleep(SOUND_EVENT_SEC)
+        if not CLIENTS:
+            continue
+        level = rms(_snapshot_buffer(SOUND_EVENT_SEC))
+        if level < VOLUME_THRESHOLD:
+            continue
+        cutoff = time.monotonic() - 0.3
+        with _doa_lock:
+            recent = [a for t, a in _doa_history if t >= cutoff]
+        if len(recent) < SOUND_MIN_READINGS:
+            continue
+        x = sum(math.cos(math.radians(a)) for a in recent) / len(recent)
+        y = sum(math.sin(math.radians(a)) for a in recent) / len(recent)
+        if math.hypot(x, y) < SOUND_MIN_AGREEMENT:
+            continue  # readings disagree: no trustworthy direction
+        payload = json.dumps({
+            "type": "sound",
+            "angle": round(math.degrees(math.atan2(y, x)) % 360, 1),
+            "level": round(level, 4),
+            "speech": True,
+            "timestamp": time.time(),
+        })
+        await asyncio.gather(*[c.send(payload) for c in CLIENTS.copy()], return_exceptions=True)
+
+
 async def _live_caption_loop(live_captions):
     """Keep a Scribe Realtime session running; reconnect with backoff (e.g. hotspot drops)."""
     print("    live captions: task started")
@@ -1543,7 +1947,8 @@ async def _live_caption_loop(live_captions):
     while True:
         try:
             await live_captions.run(ELEVENLABS_API_KEY, _caption_audio, direction, _live_people,
-                                    on_ready=connected)
+                                    on_ready=connected, on_text=_caption_wake,
+                                    publish=_publish_caption)
             print("    live captions: connection closed, reconnecting")
         except asyncio.CancelledError:
             raise
@@ -1559,6 +1964,8 @@ async def _report(transcript, alternatives, angle, volume):
 
     if not transcript or not is_new_transcript(transcript):
         return
+    if _caption_audio is not None:
+        return  # live ElevenLabs captions feed the app; don't also send Whisper's rough text
 
     name_detected = detect_name(alternatives)
     local = local_reason(transcript, angle, volume, name_detected)
@@ -1601,6 +2008,13 @@ async def _gemini_update(transcript, alternatives, angle, volume, name_detected)
 async def handle_client(websocket):
     CLIENTS.add(websocket)
     print(f"Client connected. Total: {len(CLIENTS)}")
+    try:
+        await websocket.send(json.dumps({"type": "snapshot", "refine": _refiner is not None,
+                                         "captions": list(_recent_captions)}))
+        if _last_summary:
+            await websocket.send(json.dumps(_last_summary))
+    except Exception:
+        pass
 
     try:
         await websocket.wait_closed()
@@ -1650,7 +2064,7 @@ async def wake_loop():
         try:
             angle = _direction_during(spans)
             tag = _event_tag(angle, peak)
-            await broadcast(make_payload(angle, peak, stage="directional"))
+            _spawn(broadcast(make_payload(angle, peak, stage="directional")))  # never wait on a slow app here
 
             t0 = time.monotonic()
             transcript, alternatives = await asyncio.to_thread(transcribe_audio, audio)
@@ -1661,18 +2075,10 @@ async def wake_loop():
             # Wake check first, before dedupe or broadcasting: this is the latency-critical path.
             # Only the wake phrase ("Hello Jax" or a variation) triggers, not the name on its own.
             if wake_phrase_detected(alternatives):
-                # Use the window's capture time, not "after Whisper": Whisper's 0.8-1.6 s jitter
-                # would otherwise let the same phrase slip past the cooldown and announce twice.
-                now = tick
-                if now - _last_wake >= WAKE_COOLDOWN_SEC:
-                    _last_wake = now
-                    haptics.guide(angle, track=_track_speaker)
-                    display_cue.show_async(angle)
-                    print(f"{tag} wake phrase: BUZZ toward {display_cue.direction(angle)} ({angle:.0f} deg)")
-                    if CATCHUP_SEC and ELEVENLABS_API_KEY:
-                        _spawn(_catch_up(angle, time.monotonic()))
-                else:
-                    print(f"{tag} wake phrase: same phrase still in the window, not re-announcing")
+                # Window capture time, not "after Whisper", so its jitter can't cause a double buzz.
+                # Often ElevenLabs' live captions already fired for this phrase (faster).
+                if not _wake(angle, "Whisper", when=tick) and WAKE_LOG:
+                    print(f"{tag} wake phrase: already handled, not re-announcing")
 
             await _report(transcript, alternatives, angle, peak)
         except Exception:
@@ -1726,6 +2132,7 @@ async def main():
         print(f"    LIVE CAPTIONS   = on (Scribe Realtime, mic channel {CAPTION_AUDIO_CHANNEL})")
     else:
         print("    LIVE CAPTIONS   = off (needs LIVE_CAPTIONS=1 and ELEVENLABS_API_KEY)")
+    print(f"    VOICE-ID LINES  = {'on while the web app is open' if (REFINE_CAPTIONS and LIVE_CAPTIONS and ELEVENLABS_API_KEY) else 'off'}")
     print(f"    WAKE NAMES      = {', '.join(_name_targets() + list(WAKE_EXTRA_NAMES))} after {', '.join(WAKE_GREETINGS)}")
     print(f"    AUDIO CHANNEL   = {AUDIO_CHANNEL} of {AUDIO_INPUT_CHANNELS}")
     print(f"    DOA             = {DOA_SOURCE}, flip {'on' if DOA_FLIP_LEFT_RIGHT else 'off'}, offset {DOA_OFFSET_DEG:.0f} deg, poll {DOA_POLL_SEC:.2f}s")
@@ -1752,7 +2159,7 @@ async def main():
 
     # Live captions: set up the caption feed BEFORE the mic stream starts calling _audio_callback.
     # Imported here, after .env is loaded, because live_captions reads its settings at import.
-    global _caption_audio, _live_people
+    global _caption_audio, _live_people, _refine_wake
     caption_task = None
     if LIVE_CAPTIONS and ELEVENLABS_API_KEY:
         if not 0 <= CAPTION_AUDIO_CHANNEL < AUDIO_INPUT_CHANNELS:
@@ -1774,7 +2181,18 @@ async def main():
 
     try:
         async with websockets.serve(handle_client, "0.0.0.0", 8765):
-            await wake_loop()
+            sound_task = asyncio.create_task(_sound_event_loop())
+            gemini_task = asyncio.create_task(_gemini_loop()) if (GEMINI_API_KEY and caption_task) else None
+            refine_task = None
+            if REFINE_CAPTIONS and caption_task:  # live captions already imply ELEVENLABS_API_KEY
+                _refine_wake = asyncio.Event()
+                refine_task = asyncio.create_task(_refine_loop())
+            try:
+                await wake_loop()
+            finally:
+                for task in (sound_task, gemini_task, refine_task):
+                    if task:
+                        task.cancel()
     finally:
         if caption_task:
             caption_task.cancel()
@@ -1787,3 +2205,6 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         stop_audio_stream()
         print("\nServer stopped.")
+    finally:
+        _stop_doa()  # close the mic's USB connection cleanly (avoids "Bus error" at exit)
+        haptics.stop()

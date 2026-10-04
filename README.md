@@ -16,9 +16,18 @@ reSpeaker XVF3800 mic array ──► direction (DOA + on-chip speech flag, aver
    │                          catch-up: last 30 s → ElevenLabs Scribe (voice ID) → what the caller said
    │
    └─ ch0 ──► ElevenLabs Scribe Realtime ──► live captions on the OLED (+ arrow toward who is talking now)
+                                         └─► also spots "Hello Jax" ~0.2 s after it's said (faster wake, same rule)
+
+server.py ──► WebSocket :8765 ──► web app for judges (captions, voice-ID lines, Gemini summary, sound events)
+camera_server.py ──► http://<pi>:8081/ (headset camera + serves the web app)
 ```
 Only the greeting plus the name triggers the motors; the name on its own doesn't. "Hello Jax" (detection, arrow,
-motors) runs entirely on the Pi and works offline; captions and catch-up need internet and an ElevenLabs key.
+motors) runs entirely on the Pi and works offline (Whisper); captions, catch-up, Gemini and the faster ElevenLabs
+wake need internet and API keys.
+
+Web app (`frontend/`): open `http://<pi>:8081/` with `server.py` and `camera_server.py` running. Left: the headset
+camera with a tunnel-vision overlay; right: a voice-identified transcript (batch Scribe, `refine.py`) and a Gemini
+summary. Details: [frontend/README.md](frontend/README.md). Pitch/tech reference: [PITCH_REFERENCE.md](PITCH_REFERENCE.md).
 
 ## Hardware
 - Raspberry Pi 5
@@ -36,11 +45,15 @@ python doa_calibrate.py     # once, with the mic mounted
 python server.py            # everything
 ```
 Bench tests: `display_cue.py` (display), `motor_test.py` (3 buzzes at a fixed 0.25), `haptics.py` (guiding buzz).
-ElevenLabs tests: `live_captions.py` (captions alone), `scribe_test.py` (batch Scribe). Details: [ELEVENLABS.md](ELEVENLABS.md).
+ElevenLabs tests: `live_captions.py` (captions alone), `scribe_test.py` (batch Scribe), `refine_test.py` (voice-ID
+matching, offline). Details: [ELEVENLABS.md](ELEVENLABS.md).
 
 ## Roadmap
-- Names instead of `?`/`??` (Gemini, from "Hi, I'm Sam")
-- Spoken replies with ElevenLabs Text to Speech
+- IMU head tracking (BNO055) so the buzz steers accurately after the speaker stops talking
+- On-device voice fingerprints so the headset itself keeps speakers by voice, offline
+- Co-design the haptics with Usher/DeafBlind users
+
+Decided against: spoken replies (users speak for themselves) and sound-awareness haptics (not a safety device).
 
 ## Credits
 Builds on the team's earlier projects SPOOT (sound direction + Whisper) and Touchpoint (haptic motors), and the

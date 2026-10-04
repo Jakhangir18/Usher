@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0f1c26">
+  <title>Usher · Judge demo</title>
+  <link rel="stylesheet" href="static/app.css">
+  <script defer src="static/app.js"></script>
+</head>
+<body>
+  <main class="layout">
+    <!-- LEFT: camera, full bleed -->
+    <section class="see" aria-label="What they see">
+      <div id="stage" class="stage level-moderate">
+        <img id="camera" alt="Live headset camera" hidden>
+        <div id="demo-scene" class="demo-scene">
+          <div class="scene-sky"></div><div class="scene-ground"></div>
+          <div class="figure f1"><div class="head"></div><div class="body"></div></div>
+          <div class="figure f2"><div class="head"></div><div class="body"></div></div>
+        </div>
+        <div class="tunnel-blur"></div>
+        <div class="tunnel"></div>
+        <canvas id="reticle" aria-hidden="true"></canvas>
+        <div id="speaker-chip" class="speaker-chip" hidden><span id="chip-name"></span><span id="chip-arrow" class="chip-arrow">➜</span></div>
+
+        <div class="overlay-top">
+          <div class="logo">u<span>.</span></div>
+          <div class="top-actions">
+            <span id="people" class="ghost">No one heard yet</span>
+            <button id="demo" class="ghost button">Try demo</button>
+            <button id="connect" class="ghost button"><span class="dot"></span><span id="connection-label">Connect headset</span></button>
+          </div>
+        </div>
+        <p class="legend"><i class="sw yellow"></i>someone speaking <i class="sw red"></i>speaking loudly <span class="chip-key">NAME ➜</span> someone out of view</p>
+      </div>
+
+      <nav class="bar" aria-label="Simulated vision">
+        <div class="title">usher<span>.</span><small>Usher syndrome headset</small></div>
+        <div class="toggle" role="radiogroup">
+          <button data-level="full" role="radio">full vision</button>
+          <button data-level="mild" role="radio">mild</button>
+          <button data-level="moderate" role="radio" class="on">moderate</button>
+          <button data-level="severe" role="radio">severe</button>
+          <button data-level="none" role="radio">no vision</button>
+        </div>
+      </nav>
+    </section>
+
+    <!-- RIGHT: transcript on top, summary block below -->
+    <section class="right">
+      <div class="get" aria-label="Transcript">
+        <span id="source-pill" class="tag">ElevenLabs Scribe · voice-identified</span>
+        <div id="lines" class="lines" tabindex="0" aria-live="polite" aria-label="Transcript">
+          <p class="empty">Captions appear here as people speak.</p>
+        </div>
+      </div>
+
+      <div class="summary" aria-labelledby="sum-title">
+        <h3 id="sum-title">Conversation summary</h3>
+        <ul id="summary"><li class="faint">Waiting for the conversation…</li></ul>
+        <div id="chips" class="chips"></div>
+        <div class="progress">
+          <span id="speaker-now">00</span>
+          <div class="track"><div id="bar-fill" class="fill"></div></div>
+          <span id="speaker-total">00</span>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="dialog">
+    <form id="form" method="dialog">
+      <h3>Connect to the headset</h3>
+      <label for="host">Headset (Pi) address</label>
+      <input id="host" required placeholder="raspberrypi.local or 10.225.115.128" autocomplete="off">
+      <p id="connect-help" class="faint small">Captions + sound: <code>ws://ADDRESS:8765</code> (server.py). Camera:
+        <code>http://ADDRESS:8081/camera/stream</code> (camera_server.py). Same Wi-Fi as the Pi.</p>
+      <div class="actions">
+        <button type="button" id="disconnect" class="ghost button">Disconnect</button>
+        <button type="submit" class="ghost button primary">Connect</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>

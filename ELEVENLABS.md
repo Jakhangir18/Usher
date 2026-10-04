@@ -24,6 +24,17 @@ One program, one mic stream (6 channels):
 - The catch-up shows the live captions' `?`/`??` label for the caller's direction when it matches a known person
   (within 50°); otherwise no label, just the arrow (so the two never contradict each other).
 
+- **Fast wake from captions:** Scribe's live guess contains "Hello Jax" ~0.2 s after it's said, so the captions also
+  trigger the wake response (same greeting+name rule, shared cooldown: one buzz per phrase). Usually faster than
+  Whisper (~1–2 s); Whisper remains the offline fallback. Terminal: `wake phrase (ElevenLabs): BUZZ …`.
+- **Web app feed** (`frontend/`, served by `camera_server.py` at `http://<pi>:8081/`): `server.py` sends every
+  caption on the WebSocket (port 8765) as
+  `{type:"caption", session_id, segment_id, speaker_id, speaker_label, text, is_final, angle, timestamp, source}`
+  (live guesses with `is_final:false`, then the final text with the same `segment_id`; `speaker_label` is the name
+  once learned). New clients first get `{type:"snapshot", refine, captions:[...recent finished lines]}`. While live
+  captions are on, Whisper's rough text is no longer sent to the app. Full contract: `frontend/README.md`.
+- **Voice-ID lines for the web app** (`refine.py`, batch Scribe): see "Voice-identified transcript" below.
+
 `live_captions.py` and `scribe_test.py` also run on their own for testing (stop `server.py` first: only one program
 can use the mic and the display).
 
@@ -36,6 +47,8 @@ can use the mic and the display).
 | Live captions engine | `live_captions.py` (`run()`) | **Tested** standalone and inside `server.py` (full runs on the Pi) |
 | Catch me up on each "Hello Jax" | `server.py` (`_catch_up`) | **Tested** on the Pi (0.6–2.4 s, 2–3 speakers separated) |
 | Display caption modes | `display_cue.py` (`show_caption`, `show_live`) | Both work on the OLED |
+| Fast wake from live captions | `server.py` (`_caption_wake`) | **Tested** on the Pi |
+| Voice-identified lines for the web app | `refine.py`, `server.py` (`_refine_loop`) | Built 2026-10-04, offline test `refine_test.py`; not yet run on the Pi |
 
 ### Test results so far
 - **Batch Scribe (`scribe_v2`):** 20 s clip → **1.3–1.5 s** round trip. Two speakers separated correctly turn by turn
@@ -50,9 +63,10 @@ can use the mic and the display).
 
 ## Setup
 
-1. API key: elevenlabs.io → Developers → API Keys. Permissions: Speech to Text ✅, Text to Speech ✅ (for later
-   replies), Voices read ✅, Models read ✅; everything else off. Set a credit limit on the key (but check the balance
-   before a demo: Realtime streams continuously while captions are on).
+1. API key: elevenlabs.io → Developers → API Keys. Permissions: Speech to Text ✅, Models read ✅; everything else
+   off (Text to Speech isn't used: no spoken replies, by decision). Set a credit limit on the key (but check the
+   balance before a demo: Realtime streams continuously while captions are on, and voice-ID lines re-send audio
+   while the web app is open).
 2. Put it in `.env` next to `server.py` (gitignored, never commit it): `ELEVENLABS_API_KEY=...`
    On the Pi, edit `.env` with `nano`; don't copy `.env.example` over it (that wipes the key).
 3. `pip install -r requirements.txt` (needs `requests`, `websockets`, `sounddevice`, `numpy`).
@@ -131,24 +145,56 @@ One-screen test (screen clears after 4 s, so watch it):
 the wearer's own name is never learned). The person who said it (their direction's `?`/`??` label) is renamed, e.g.
 `?? → SAM`, shown in the yellow band and in catch-up. Checked on live caption pieces and on catch-up's
 voice-identified turns. Instant, free, offline. Not handled: "this is Sajad" (someone introducing another person)
-or names used in address ("Sam, did you..."); that's what Gemini could add later. Terminal: `name learned: ?? = SAM`.
+or names used in address ("Sam, did you..."); Gemini covers those (below). Terminal: `name learned: ?? = SAM`.
 Tested 2026-10-03: names learned and shown. Scribe spelled one name three ways (Ajad/Sajjad/Sajad), so a similar
 spelling (difflib ratio ≥ 0.6) no longer replaces an existing name. A clearly different name at the same direction
 replaces it with a loud `name changed: … (was …)` line: that happened when both people stood on the same side, which
 direction-based people can't tell apart. Test and demo with people clearly apart (left and right).
 
+### Names + summary with Gemini (server.py `_gemini_loop`)
+Every `GEMINI_SUMMARY_SEC` (12 s), if new captions finished, the last ~40 caption pieces (with `?`/`??` labels and
+directions) go to Gemini (`GEMINI_MODEL`, default `gemini-3.5-flash-lite`; `gemini-2.0-flash` is shut down) as one
+JSON request. It returns `names` (from introductions, "this is Sajad", people addressing each other; correct
+spelling, never the wearer) and 2–4 `summary` bullets (anything about Jax first). Names override the simple rules'
+spelling (`set_name(force=True)`) and show on the headset, in catch-up and in the web app. The app gets
+`{type:"summary", bullets, names, model, timestamp}` (also sent to new clients on connect). Background only;
+failures back off (15–60 s) and the simple rules keep working. Needs `GEMINI_API_KEY` in `.env`.
+Tested 2026-10-04: works (summaries every ~12 s, learned OLIVER/SAJAD from "This is Oliver… this is me, Sajjad").
+Fixed after testing: catch-up's name rule fought Gemini (`??` flipped OLIVER↔SAJAD 5 times) because catch-up
+directions drift while the wearer turns after "Hello Jax". Now catch-up doesn't learn names, the "I'm Sam" rule
+only names unnamed people, and only Gemini can change a name.
+Known limit: people are directions relative to the head, so when the wearer turns, someone can reappear as a new
+label (`???`, `????`); Gemini then gives that label the same name, so the display still shows the right name. The
+web app avoids this with voice-identified speakers (below). Gemini also names those (`V1`, `V2` labels).
+
+### Voice-identified transcript (`refine.py`, web app only)
+While the web app is open, after each live caption finishes, `server.py` sends batch Scribe the audio since the last
+voice-ID line (at most `REFINE_WINDOW_SEC` = 20 s, re-sending 3 s for overlap). Batch speaker IDs reset per request,
+so each request starts with a 2.5 s reference clip of every known voice: whichever speaker the diarizer puts on
+V2's clip is V2. Words overlapping the previous request also vote. Finished turns go to the app as
+`type:"refined"` lines that replace the faint live ones (`replaces`). A turn is held while the speaker keeps
+talking (sent anyway after 8 s), quiet speakers/turns (`REFINE_MIN_RMS`, ch2) are dropped as distant chatter, and
+requests stop after 6 retries without a new live caption. Billed per audio second: roughly the speech time plus
+the reference clips. Offline test: `python refine_test.py`.
+First Pi test (2026-10-04): worked end to end (0.6–2.6 s per request), but 4 people (plus a busy hackathon room)
+became 16 voices: only the 4 most recent voices had reference clips, short talkers never got one, and chatter
+created voices. Fixed: every voice gets a reference, a new voice needs 1.5 s of clear speech, quiet speakers can't
+create one, and at most `REFINE_MAX_VOICES` (6) voices; past that an unknown voice joins the voice from the
+nearest direction (each voice keeps a running direction, only used as this tie-breaker).
+
 ## To do / ideas
 - [x] Merged `server.py` tested (captions + "Hello Jax" + catch-up together).
 - [x] Catch-up tested on the Pi.
 - [x] Names from self-introductions (simple rules, above). Tested on the Pi.
-- [ ] Gemini for the names the rules miss ("this is Sajad", "Sam, did you..."); also an MLH Gemini prize entry.
-- [ ] Sound awareness: Scribe's audio event tags (laughter, applause) → a distinct haptic pattern. Not a safety
-      feature; don't pitch it as alarm detection. (Note: motors are currently "Hello Jax" only, by decision.)
-- [ ] Replies: wearer types/taps, ElevenLabs Text to Speech speaks it.
-- [ ] Realtime could also back up local Whisper for the wake phrase (keyterm "Jax").
+- [x] Gemini for names the rules miss + conversation summary. Tested on the Pi.
+- [x] Realtime backs up local Whisper for the wake phrase (keyterm "Jax"). Tested on the Pi.
+- [ ] Voice-ID lines: first run on the Pi; tune `REFINE_MIN_RMS`.
+- Decided against: sound-awareness haptics (not a safety device; motors are "Hello Jax" only) and spoken replies
+  with Text to Speech (users speak for themselves).
 
 ## Gotchas
 - Never commit `.env`. Check `git status` shows it as ignored.
-- Scribe speaker IDs reset per request; directions are what keep people consistent across requests.
+- Scribe speaker IDs reset per request: on the headset, directions keep people consistent; in the web app, the
+  voice reference clips do.
 - Privacy: this streams bystanders' speech to the cloud. Have an answer ready for judges (consent, nothing stored).
 - Credits: Realtime streams the whole time captions are on. Check the balance before a demo.

@@ -128,10 +128,10 @@ Live caption layout (option B, built: `display_cue.show_live`):
 ## Speaker tagging plan
 | Layer | Figures out | How |
 |---|---|---|
-| Voice fingerprint (on Pi) | same person as before | speaker embedding per clip (Resemblyzer / SpeechBrain ECAPA), matched across clips |
-| Direction (mic array) | where they are | DOA angle; tie-breaker when voices sound alike |
-| ElevenLabs Scribe | transcript + who spoke when within a clip | cloud STT with diarization (labels reset per request, hence the fingerprints) |
-| Gemini | names and context ("A is Sam", who's talking to Jax, topic) | reads the recent labelled transcript every ~20–30 s |
+| Direction (mic array) | where they are; the headset's live speakers `?`/`??` | DOA angle (instant, local; drifts when the wearer turns) |
+| ElevenLabs batch Scribe | transcript + who spoke when within a clip | cloud STT with diarization (labels reset per request) |
+| Voice reference clips (`refine.py`, web app only) | same voice across requests: stable `V1`/`V2` | each batch request starts with a short clip of every known voice; whoever the diarizer puts on V2's clip is V2 |
+| Gemini | names and context ("A is Sam", who's talking to Jax, topic) | reads the recent labelled transcript every 12 s |
 
 Unknown speakers are shown as question marks, one more per new unknown person: first `?`, second `??`, third `???`, ...
 (e.g. `◀ ??`). When Gemini learns a name ("Hi, I'm Sam"), that person's marks become `SAM` everywhere, including history.
@@ -140,13 +140,27 @@ Counting marks gets hard past ~4, so the 5th unknown onwards could fall back to 
 LLM: keep Gemini (already in SPOOT, and counts for the MLH Gemini track). Gemini can only name people who get
 named in conversation. It never sits in the buzz path.
 
-## Later
-- Companion app / front end (not now).
+## Web app for judges (`frontend/`, served by `camera_server.py`)
+A visualisation for judges, not a companion app. Run `python server.py` and `/usr/bin/python3 camera_server.py`
+on the Pi, open `http://<pi>:8081/` (same origin for page + camera: browsers auto-upgrading a separate camera URL to
+HTTPS broke the feed; it auto-connects to ws :8765). Left: camera + tunnel-vision overlay (toggles), noise reticle
+(`type:"sound"`), off-view speaker chip. Right: transcript + Gemini summary. Message contract: `frontend/README.md`.
+**Voice-ID lines (`refine.py`, `REFINE_CAPTIONS=1`):** while the page is open, after each live caption finishes the
+server batch-transcribes the audio since the last line sent (≤ `REFINE_WINDOW_SEC` 20 s, 3 s overlap, ch2) with
+reference clips of known voices prepended, and sends `type:"refined"` lines (`V1`, `V2`, stable for the session)
+that replace the live ones listed in `replaces`. Turns are sent when they end (held while the speaker keeps talking,
+up to 8 s; a 1 s pause starts a new line); quiet speakers/turns (`REFINE_MIN_RMS`) are dropped; at most 6 retries per
+new live caption. Gaps (errors, no page open) leave live lines alone rather than "replacing" text a line never
+contained. Offline test: `python refine_test.py`.
+Tested on the Pi 2026-10-04: works, 0.6–2.6 s per request, but 4 people became 16 voices. Now every voice gets a
+reference clip, new voices need 1.5 s of clear speech, and `REFINE_MAX_VOICES` (6) caps them (past it: nearest
+direction). Reticle: `type:"sound"` only on chip-flagged speech with agreeing readings (non-speech readings jump
+between beams and drew random pings).
 
 ## .env
 Copy `.env.example` to `.env` (the Pi's `.env` also holds the ElevenLabs key, so edit it with nano rather than
 overwriting it). Put "jack" in `WAKE_EXTRA_NAMES`, not `USER_NAME_ALIASES` (aliases also drive name-only matching).
-Leave `GEMINI_API_KEY` empty for now. Gemini is too slow for the core turn loop and local name detection is enough.
+`GEMINI_API_KEY` turns on names + summary (`_gemini_loop`, background only; never in the buzz path).
 
 ## Known issues / to check
 - Latency: Whisper tiny.en takes ~0.8–1.6 s per window on the Pi 5 (faster-whisper pads to 30 s). Watch the
@@ -176,6 +190,10 @@ Leave `GEMINI_API_KEY` empty for now. Gemini is too slow for the core turn loop 
 ch0, `LIVE_CAPTIONS=1`) run alongside via `live_captions.run()`, fed from the same mic stream (`_audio_callback` →
 `CaptionAudio.feed`) and the server's DOA history (`_ServerDirection`), reconnecting on their own.
 **Decision: motors only fire for "Hello Jax"**, never for live captions (fewer chances for wrong cues).
+"Hello Jax" is detected by both Whisper and the ElevenLabs live captions (whichever first; `_wake()` with a shared
+cooldown). Captions go to the web app (`frontend/`) over the :8765 WebSocket as `type:"caption"` messages, plus
+voice-ID `type:"refined"` lines while it's open (see "Web app for judges"). **Decisions: no sound-awareness haptics, no auto-start, no spoken replies** (people with
+Usher syndrome can speak for themselves; the device shouldn't take that autonomy away).
 `display_cue` priority: `show()` / `show_caption()` own the screen; `show_live()` is skipped meanwhile.
 `live_captions` is imported after `.env` is loaded (it reads settings at import). Details: [ELEVENLABS.md](ELEVENLABS.md).
 
@@ -199,12 +217,12 @@ Core idea: "Catch me up". People with Usher syndrome often miss the start of a c
 1. Scribe (STT) transcribes continuously; each line is tagged with a speaker label and the DOA angle.
 2. "Hello Jax" → buzz → wearer turns.
 3. Micro display shows what that speaker said in the last ~30 s, then live captions.
-4. Later: wearer replies by typing/tapping; ElevenLabs TTS speaks it (chosen voice or their own cloned voice). Needs an input device.
+(Spoken replies via TTS and sound-awareness haptics were considered and **decided against**, see "One program for
+the demo".)
 
 Additions:
-- Sound awareness: map Scribe's audio event tags (laughter, applause, ...) to a distinct haptic pattern. Not a safety feature, don't pitch it as alarm detection.
 - Voice Isolator on noisy-hall audio before Scribe, if the added latency is acceptable.
-- Name learning: when someone says "Hi, I'm Sam", an LLM links the name to that speaker label + direction, so captions read "Sam (on your right)".
+- Name learning (built): "Hi, I'm Sam" rule + Gemini, so captions read `SAM` instead of `??`.
 
 Telling speakers apart: DOA angle first (free, local, instant), Scribe diarization second, LLM last
 (names, summaries, off the critical path). Keep the "Hello Jax" → buzz loop local and independent of all of this.
