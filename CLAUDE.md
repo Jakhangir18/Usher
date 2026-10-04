@@ -9,14 +9,17 @@ Team of 4, hackathon build. Repo: https://github.com/Jakhangir18/Usher
 
 ## Hardware
 - Raspberry Pi 5 (runs everything). gpiozero needs lgpio: `GPIOZERO_PIN_FACTORY=lgpio`, venv with `--system-site-packages`.
-- reSpeaker XVF3800 USB 4-mic array (DOA via vendor `xvf_host` tool, needs sudo). ALSA card 2, **6 channels**.
+- reSpeaker XVF3800 USB 4-mic array. Direction: `DOA_VALUE` over USB via pyusb (`doa_reader.py`, needs the udev
+  rule); the vendor `xvf_host` binary (needs passwordless sudo) is only the fallback. ALSA card 2, **6 channels**.
   Never record it as 1 channel (averages all 6 → echoey). Tested 2026-10-03: ch0 = processed beam, auto-gain,
-  clipped (−21 dBFS avg, 142 clipped samples in 5 s); ch2 = single raw mic, clean, −27 dBFS. Using ch2 for now
-  (`AUDIO_INPUT_CHANNELS=6`, `AUDIO_CHANNEL=2`); retry ch0 with lower AGC gain if the hall is noisy.
+  clipped in a quiet room (−21 dBFS avg); ch2 = single raw mic, clean, −27 dBFS. **Whisper "Hello Jax" + catch-up use
+  ch2** (`AUDIO_CHANNEL=2`); **live captions use ch0** (`CAPTION_AUDIO_CHANNEL=0`: better nearby-vs-background gap).
 - 2 motors on the temples (left = GPIO4 / pin 7 / "P1", right = GPIO5 / pin 29 / "P2", BCM numbering), wired like Quackhack/Touchpoint;
   micro vibration motors (red/blue leads),
   each switched by a MOSFET trigger module as in Touchpoint's schematic (motor between VCC and the module, Pi pin → module signal).
-- **Keep motor power very low, the motors are fragile.** `LEVEL` 0.15, `KICK_LEVEL` 0.30 in `haptics.py`.
+- **Motors are fragile; change power in small steps.** `LEVEL` 0.35, `KICK_LEVEL` 0.60 in `haptics.py` (raised from
+  0.15/0.30 at the user's request; Touchpoint ran the same motors at 0.35 with a 1.0 kick). Tested 2026-10-03:
+  0.5 is too strong on the temples, **0.35 is our level**. `motor_test.py` ramps to 0.35, hard cap 0.4.
   Raise in 0.05 steps only if needed (KICK_LEVEL first if it won't spin). Power motors from 3.3 V, not 5 V, if they're ~3 V rated.
 - No IMU. Guidance is open-loop. If one is added later, BNO055 is preferred (on-chip fusion, gives heading directly).
 
@@ -37,7 +40,7 @@ Built on two of a teammate's prior hackathon repos:
     - <60°: 1 pulse on that side
     - <120°: 2 pulses
     - behind: 3 pulses
-  - Single fixed very low intensity `LEVEL` (0.15) with a short `KICK_LEVEL` (0.30) start-up boost, adjustable at the top of the file.
+  - Single fixed intensity `LEVEL` (0.35) with a short `KICK_LEVEL` (0.60) start-up boost, adjustable at the top of the file.
   - Dead behind (exactly 180°) counts as left.
   - If GPIO can't be opened (dev laptop, missing lgpio) it falls back to dummy motors with a warning, so `server.py` still runs.
   - Bench test: `python haptics.py`
@@ -79,14 +82,15 @@ Built on two of a teammate's prior hackathon repos:
    Audio stream opened with `latency='high'` (one startup "input overflow" seen before). Wake cooldown is measured
    from the window's capture time so Whisper jitter can't cause a double announcement.
 
-Current focus: "Hello Jax" → display arrow (motors detached for now). Phone/PWA is out of scope: Flask still runs
+Current focus: the merged demo program (see "One program for the demo" below). Phone/PWA is out of scope: Flask still runs
 (`/state` works), but `index.html`/`manifest.json` aren't in this repo, so `/` and `/manifest.json` return 404.
 
 ## Setup on the Pi (from scratch)
 1. `sudo apt install -y libportaudio2 python3-lgpio i2c-tools sox` and enable I2C: `sudo raspi-config nonint do_i2c 0`.
 2. Mic tool: `cd ~/Documents && git clone https://github.com/respeaker/reSpeaker_XVF3800_USB_4MIC_ARRAY.git`, then
    `chmod +x ~/Documents/reSpeaker_XVF3800_USB_4MIC_ARRAY/host_control/rpi_64bit/xvf_host`.
-   `server.py` runs `sudo xvf_host` several times a second, so sudo must not ask for a password (Pi OS default user is fine).
+   Only needed for the fallback direction source and `doa_calibrate.py`'s fallback; it runs `sudo xvf_host`, so sudo
+   must not ask for a password (Pi OS default user is fine). The normal source is USB (step 5).
 3. Code: clone this repo, then `python3 -m venv --system-site-packages .venv && source .venv/bin/activate && pip install -r requirements.txt`
    (`--system-site-packages` so gpiozero/lgpio from Pi OS are visible).
 4. `cp .env.example .env`, then add any keys. After that, edit `.env` with nano; don't copy over it again (it holds keys).
@@ -100,21 +104,22 @@ Current focus: "Hello Jax" → display arrow (motors detached for now). Phone/PW
 
 ## Display
 `display_cue.py`: on "Hello Jax", `server.py` also shows the turn direction on the OLED (yellow band "HELLO JAX 270°",
-blue area arrow + LEFT/RIGHT/FRONT/BEHIND, same thresholds as `haptics.py`, clears after 4 s). Lets the wake test run with
-motors detached. Bench test: `python display_cue.py` (also the display wiring test).
+blue area arrow + LEFT/RIGHT/FRONT/BEHIND, same thresholds as `haptics.py`, clears after 4 s).
+Bench test: `python display_cue.py` (also the display wiring test).
+`display_cue.show_caption(who, text, where)`: caption mode (yellow band = small arrow + speaker label, blue = text
+word-wrapped 3 lines × ~20 chars, paged every 2.5 s). Try it with Scribe: `python scribe_test.py --record 20 --display`.
 
 128×64 SSD1306, two-colour: fixed yellow band at the top (~16 px), blue below. Colours are fixed in the glass,
 so we can't colour-code people; speakers are shown by name/letter + direction arrow instead.
-I2C on GPIO2/3 (pins 3/5, no clash with motor pins), address 0x3C. The caption layout below goes in `display_cue.py`
-(or a sibling module); only one program may drive the display at a time.
+I2C on GPIO2/3 (pins 3/5, no clash with motor pins), address 0x3C. Only one program may drive the display at a time.
 
-Planned layout:
+Live caption layout (option B, built: `display_cue.show_live`):
 ```
 ┌────────────────────────┐
-│ ◀ SAM                  │  yellow: who is speaking + direction arrow
+│ ◀ ??                   │  yellow: who is talking NOW + direction arrow
 ├────────────────────────┤
-│ did you bring the      │  blue: what they're saying
-│ motors? I left them    │  (~3 lines × ~21 chars)
+│ did you bring the      │  blue: what's being said, last 3 lines,
+│ motors? I left them    │  no speaker tags (LIVE_SPEAKER_TAGS=1 adds them)
 │ by the door            │
 └────────────────────────┘
 ```
@@ -165,6 +170,23 @@ Leave `GEMINI_API_KEY` empty for now. Gemini is too slow for the core turn loop 
 - Temples are sensitive: keep default intensity low and adjustable.
 - Test DOA in a noisy hall, not just a quiet room (echoes, false name triggers).
 
+## One program for the demo (`python server.py`)
+"Hello Jax" (Whisper, ch2) → motors (turn pattern, LEVEL 0.35) + arrow → catch-up text; live captions (Scribe Realtime,
+ch0, `LIVE_CAPTIONS=1`) run alongside via `live_captions.run()`, fed from the same mic stream (`_audio_callback` →
+`CaptionAudio.feed`) and the server's DOA history (`_ServerDirection`), reconnecting on their own.
+**Decision: motors only fire for "Hello Jax"**, never for live captions (fewer chances for wrong cues).
+`display_cue` priority: `show()` / `show_caption()` own the screen; `show_live()` is skipped meanwhile.
+`live_captions` is imported after `.env` is loaded (it reads settings at import). Details: [ELEVENLABS.md](ELEVENLABS.md).
+
+## Catch me up (built in server.py, not yet tested on the Pi)
+On a wake, after the arrow: `_catch_up()` sends the last `CATCHUP_SEC` (30 s; audio ring buffer sized for it) to batch
+Scribe via `scribe.py` (diarize, word timestamps), gives each speaker a direction (circular mean of the speech DOA
+readings during their words, `_speaker_directions`), picks the caller (last speaker with a name word, else nearest the
+wake direction, `_find_caller`), and shows the caller's last `CATCHUP_WORDS` (45) words with `display_cue.show_caption`
+once the arrow has had 2.5 s. Runs as a background task: arrow/motors never wait; no key or no internet = no caption.
+Terminal prints every speaker turn with label + direction. `scribe.py` = shared Scribe helpers (also used by
+`scribe_test.py`, `live_captions.py`).
+
 ## ElevenLabs plan (sponsor track)
 Core idea: "Catch me up". People with Usher syndrome often miss the start of a conversation.
 1. Scribe (STT) transcribes continuously; each line is tagged with a speaker label and the DOA angle.
@@ -180,8 +202,10 @@ Additions:
 Telling speakers apart: DOA angle first (free, local, instant), Scribe diarization second, LLM last
 (names, summaries, off the critical path). Keep the "Hello Jax" → buzz loop local and independent of all of this.
 
-To check: whether Scribe realtime supports diarization or only batch does. If only batch, use DOA alone for
-live captions and run batch Scribe on the last 30 s when the catch-up is requested. Need word-level timestamps either way to align words with DOA.
+Checked in ElevenLabs docs (2026-10-03): **Scribe v2 Realtime (WebSocket, ~150 ms) has NO diarization**; batch
+`scribe_v2` does (up to 32 speakers). So: live captions = Realtime with speakers by direction (option B: only "who is
+talking now" in the yellow band, no tags on past text); catch-up = batch Scribe with voice-based speakers.
+**Current, detailed state of all ElevenLabs parts (API details, test results, tuning, to-dos): [ELEVENLABS.md](ELEVENLABS.md).**
 
 Privacy: this streams other people's speech to the cloud. Have an answer ready for judges (consent, what's stored).
 

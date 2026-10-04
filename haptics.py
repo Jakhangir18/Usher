@@ -26,10 +26,10 @@ RIGHT_GPIO = 5  # P2 in the Touchpoint/Quackhack diagram, physical pin 29
 FREQ = 200
 
 # --- Tuning -----------------------------------------------------------------
-# Motors are fragile: keep power VERY low. Raise in 0.05 steps only if the motor
-# doesn't spin (raise KICK_LEVEL first) or the wearer can't feel it (then LEVEL).
-LEVEL = 0.15          # running power
-KICK_LEVEL = 0.30     # brief start-up boost to get past stall torque
+# Micro motors are fragile: change in 0.05 steps. Raised from 0.15/0.30 so the cue is
+# easy to feel; lower LEVEL if it's too strong on the temples or the motors get warm.
+LEVEL = 0.35          # running power (Touchpoint ran these motors at 0.35 with a 1.0 kick)
+KICK_LEVEL = 0.60     # brief start-up boost to get past stall torque
 KICK_SEC = 0.04
 PULSE_SEC = 0.12      # total pulse length, including the kick
 GAP_SEC = 0.15        # between pulses in a group (long enough to count)

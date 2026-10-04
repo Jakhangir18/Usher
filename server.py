@@ -22,6 +22,7 @@ from flask_cors import CORS
 import display_cue
 import doa_reader
 import haptics
+import scribe
 
 
 # =========================
@@ -148,7 +149,7 @@ DOA_POLL_SEC = float(os.environ.get("DOA_POLL_SEC", "0.05"))
 
 # Recent (monotonic time, angle) readings taken WHILE THE CHIP HEARD SPEECH, so a wake
 # uses the average direction of the voice instead of one jumpy (or noise) reading.
-_doa_history = collections.deque(maxlen=400)
+_doa_history = collections.deque(maxlen=1500)  # ~75 s of speech at 20 readings/s (catch-up needs 30 s)
 
 
 def _doa_poll_loop():
@@ -331,6 +332,8 @@ def _get_whisper():
             WHISPER_MODEL,
             device="cpu",
             compute_type="int8",
+            # Leave a core for the audio callback, live captions and display.
+            cpu_threads=int(os.environ.get("WHISPER_CPU_THREADS", "3")),
         )
         print(f"    Whisper model ready.")
 
@@ -432,6 +435,23 @@ USER_NAME_ALIASES = tuple(
 NAME_FUZZY_THRESHOLD = float(os.environ.get("NAME_FUZZY_THRESHOLD", "0.72"))
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+
+# "Catch me up": on a wake, send the last CATCHUP_SEC of audio to ElevenLabs Scribe (batch, with
+# speaker labels), find who said the name, and show their recent words on the display after the
+# arrow. Needs internet + ELEVENLABS_API_KEY; the arrow/motors never wait for it. 0 disables.
+ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "").strip()
+CATCHUP_SEC = float(os.environ.get("CATCHUP_SEC", "30"))
+CATCHUP_WORDS = int(os.environ.get("CATCHUP_WORDS", "45"))   # most recent words of the caller shown
+CATCHUP_ARROW_SEC = 2.5   # let the arrow stay up at least this long before the text replaces it
+
+# Live captions (live_captions.run, ElevenLabs Scribe Realtime) alongside "Hello Jax", from the
+# same mic stream: Whisper/catch-up read AUDIO_CHANNEL (ch2), captions read CAPTION_AUDIO_CHANNEL
+# (ch0, the chip's processed beam). Motors only ever fire for "Hello Jax", never for captions.
+LIVE_CAPTIONS = os.environ.get("LIVE_CAPTIONS", "1").strip() == "1"
+CAPTION_AUDIO_CHANNEL = int(os.environ.get("CAPTION_AUDIO_CHANNEL", "0"))
+
+_caption_audio = None   # live_captions.CaptionAudio, fed from _audio_callback when captions are on
+_live_people = None     # live_captions.People shared with catch-up so both use the same ?/?? labels
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 GEMINI_TIMEOUT_SEC = float(os.environ.get("GEMINI_TIMEOUT_SEC", "3.0"))
 GEMINI_MIN_INTERVAL_SEC = float(os.environ.get("GEMINI_MIN_INTERVAL_SEC", "4.0"))
@@ -459,7 +479,7 @@ def rms(audio_array):
     return float(np.sqrt(np.mean(audio_array ** 2)))
 
 
-_BUFFER_TOTAL_SEC = WAKE_WINDOW_SEC + 1.0
+_BUFFER_TOTAL_SEC = max(WAKE_WINDOW_SEC, CATCHUP_SEC) + 1.0
 _MAX_BLOCKS = int(_BUFFER_TOTAL_SEC * SAMPLE_RATE / BLOCKSIZE) + 4
 
 _audio_blocks = collections.deque(maxlen=_MAX_BLOCKS)
@@ -473,6 +493,14 @@ def _audio_callback(indata, frames, time_info, status):
     block = indata[:, AUDIO_CHANNEL].copy()
     with _audio_lock:
         _audio_blocks.append(block)
+    if _caption_audio is not None:
+        # Guarded: an exception in a sounddevice callback stops the stream, which would also
+        # silently stop "Hello Jax" (the ring buffer above would freeze).
+        try:
+            caption = np.clip(indata[:, CAPTION_AUDIO_CHANNEL], -1.0, 1.0)
+            _caption_audio.feed((caption * 32767).astype(np.int16))
+        except Exception as exc:
+            print(f"WARNING caption feed: {exc!r}")
 
 
 def _list_input_devices():
@@ -628,23 +656,32 @@ def _loud_spans(audio, end_time):
     return spans, peak
 
 
-def _direction_during(spans):
-    """Circular mean of the DOA readings taken during the loud parts of the window (latest reading as fallback)."""
-
-    with _doa_lock:
-        history = list(_doa_history)
-        latest = _doa_azimuth_deg
-
-    pad = DOA_POLL_SEC  # readings are sparser than the 0.1 s frames
-    angles = [a for t, a in history if any(s - pad <= t <= e + pad for s, e in spans)]
+def _circular_mean(angles):
+    """Mean of angles on a circle (359 and 1 average to 0, not 180), or None."""
     if not angles:
-        return latest
-
+        return None
     x = sum(math.cos(math.radians(a)) for a in angles)
     y = sum(math.sin(math.radians(a)) for a in angles)
     if math.hypot(x, y) < 1e-9:
-        return latest
+        return None
     return math.degrees(math.atan2(y, x)) % 360
+
+
+def _angles_during(spans, pad=None):
+    """Speech DOA readings whose monotonic time falls inside any (start, end) span."""
+    pad = DOA_POLL_SEC if pad is None else pad  # readings are sparser than the 0.1 s frames
+    with _doa_lock:
+        history = list(_doa_history)
+    return [a for t, a in history if any(s - pad <= t <= e + pad for s, e in spans)]
+
+
+def _direction_during(spans):
+    """Circular mean of the DOA readings taken during the loud parts of the window (latest reading as fallback)."""
+    mean = _circular_mean(_angles_during(spans))
+    if mean is None:
+        with _doa_lock:
+            return _doa_azimuth_deg
+    return mean
 
 
 def angle_difference(a, b):
@@ -1325,6 +1362,130 @@ async def broadcast(payload):
 # Pipeline: HUD reporting (off the wake path)
 # =========================
 
+# =========================
+# Catch me up (ElevenLabs Scribe, off the wake path)
+# =========================
+
+_background_tasks = set()  # keep references so running tasks aren't garbage-collected
+
+
+def _spawn(coro):
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
+def _speaker_directions(turns, clip_start):
+    """Each Scribe speaker's direction: mean of the speech DOA readings taken while they were talking."""
+    out = {}
+    for speaker in {t[0] for t in turns}:
+        spans = [(clip_start + s, clip_start + e) for sp, s, e, _ in turns if sp == speaker]
+        mean = _circular_mean(_angles_during(spans, pad=0.1))
+        if mean is not None:
+            out[speaker] = mean
+    return out
+
+
+def _find_caller(turns, directions, wake_angle):
+    """Who said the name: the last speaker with a name word, else whoever sits nearest the wake direction."""
+    names = set(_name_targets()) | set(WAKE_EXTRA_NAMES)
+    for speaker, _, _, words in reversed(turns):
+        if any(re.sub(r"[^a-z]", "", w.lower()) in names for w in words):
+            return speaker
+    if directions:
+        return min(directions, key=lambda sp: angle_difference(directions[sp], wake_angle))
+    return turns[-1][0]
+
+
+async def _catch_up(wake_angle, wake_time):
+    """Show what the caller said in the last CATCHUP_SEC, after the arrow. Never raises."""
+    try:
+        audio = _snapshot_buffer(CATCHUP_SEC)
+        clip_start = time.monotonic() - len(audio) / SAMPLE_RATE
+        result, secs = await asyncio.to_thread(
+            scribe.transcribe, scribe.wav_bytes(audio, SAMPLE_RATE), ELEVENLABS_API_KEY)
+        turns = scribe.speaker_turns(result)
+        if not turns:
+            print(f"    catch-up: Scribe heard nothing ({secs:.1f}s)")
+            return
+
+        labels = scribe.unknown_labels(turns)
+        directions = _speaker_directions(turns, clip_start)
+        caller = _find_caller(turns, directions, wake_angle)
+        print(f"    catch-up: Scribe {secs:.1f}s, {len(labels)} speaker(s), caller {labels[caller]}")
+        for speaker, start, end, words in turns:
+            where = display_cue.direction(directions[speaker]) if speaker in directions else "?"
+            print(f"      {labels[speaker]:<4} {where:<6} {' '.join(words)}")
+
+        words = scribe.clean_words([w for sp, _, _, ws in turns if sp == caller for w in ws])
+        text = " ".join(words[-CATCHUP_WORDS:])
+        if len(words) > CATCHUP_WORDS:
+            text = "... " + text
+        where = display_cue.direction(directions.get(caller, wake_angle))
+
+        wait = wake_time + CATCHUP_ARROW_SEC - time.monotonic()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        # Same label the live captions use for that direction, so "??" means the same person.
+        # With live captions on but no match, show no label rather than a clashing one (the
+        # arrow still points at them). Without live captions, Scribe's own ?/?? is fine.
+        label = labels[caller]
+        if _live_people is not None:
+            label = (_live_people.nearest(directions[caller]) if caller in directions else None) or ""
+        display_cue.show_caption_async(label, text, where)
+    except Exception:
+        print("    catch-up failed (arrow/motors unaffected):")
+        traceback.print_exc()
+
+
+# =========================
+# Live captions (ElevenLabs Scribe Realtime, alongside "Hello Jax")
+# =========================
+
+class _ServerDirection:
+    """live_captions' direction interface on top of this server's DOA thread (speech readings only)."""
+
+    def __init__(self, window):
+        self.window = window
+
+    def current(self):
+        cutoff = time.monotonic() - self.window
+        with _doa_lock:
+            angles = [a for t, a in _doa_history if t >= cutoff]
+        return _circular_mean(angles)
+
+    def silent_for(self):
+        with _doa_lock:
+            last = _doa_history[-1][0] if _doa_history else 0.0
+        return time.monotonic() - last
+
+    def angles_between(self, start, end):
+        with _doa_lock:
+            return [a for t, a in _doa_history if start <= t <= end]
+
+
+async def _live_caption_loop(live_captions):
+    """Keep a Scribe Realtime session running; reconnect with backoff (e.g. hotspot drops)."""
+    direction = _ServerDirection(live_captions.DIRECTION_WINDOW)
+    backoff = {"sec": 2.0}
+
+    def connected():
+        backoff["sec"] = 2.0
+
+    while True:
+        try:
+            await live_captions.run(ELEVENLABS_API_KEY, _caption_audio, direction, _live_people,
+                                    on_ready=connected)
+            print("    live captions: connection closed, reconnecting")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"WARNING live captions: {exc!r}; retrying in {backoff['sec']:.0f}s "
+                  "(Hello Jax is unaffected)")
+        await asyncio.sleep(backoff["sec"])
+        backoff["sec"] = min(backoff["sec"] * 2, 30.0)
+
+
 async def _report(transcript, alternatives, angle, volume):
     """Dedupe overlapping windows' transcripts, then broadcast to the HUD/OLED clients."""
 
@@ -1343,7 +1504,7 @@ async def _report(transcript, alternatives, angle, volume):
 
     # Gemini is slow; never let it hold up the next window. No key: skip entirely.
     if GEMINI_API_KEY:
-        asyncio.create_task(_gemini_update(transcript, alternatives, angle, volume, name_detected))
+        _spawn(_gemini_update(transcript, alternatives, angle, volume, name_detected))
 
 
 async def _gemini_update(transcript, alternatives, angle, volume, name_detected):
@@ -1423,6 +1584,8 @@ async def wake_loop():
                     haptics.guide(angle)
                     display_cue.show_async(angle)
                     print(f"{tag} wake phrase: BUZZ toward {display_cue.direction(angle)} ({angle:.0f} deg)")
+                    if CATCHUP_SEC and ELEVENLABS_API_KEY:
+                        _spawn(_catch_up(angle, time.monotonic()))
                 else:
                     print(f"{tag} wake phrase: same phrase still in the window, not re-announcing")
 
@@ -1470,6 +1633,14 @@ async def main():
     print(f"    GEMINI_MODEL    = {GEMINI_MODEL}")
     print(f"    GEMINI_KEY      = {'set' if GEMINI_API_KEY else 'NOT set (local fallback only)'}")
     print(f"    WAKE WINDOW     = last {WAKE_WINDOW_SEC:.1f}s every {WAKE_HOP_SEC:.1f}s, threshold {VOLUME_THRESHOLD:.4f}")
+    if CATCHUP_SEC and ELEVENLABS_API_KEY:
+        print(f"    CATCH-UP        = last {CATCHUP_SEC:.0f}s via ElevenLabs Scribe after each wake")
+    else:
+        print("    CATCH-UP        = off (set ELEVENLABS_API_KEY in .env to enable)")
+    if LIVE_CAPTIONS and ELEVENLABS_API_KEY:
+        print(f"    LIVE CAPTIONS   = on (Scribe Realtime, mic channel {CAPTION_AUDIO_CHANNEL})")
+    else:
+        print("    LIVE CAPTIONS   = off (needs LIVE_CAPTIONS=1 and ELEVENLABS_API_KEY)")
     print(f"    WAKE NAMES      = {', '.join(_name_targets() + list(WAKE_EXTRA_NAMES))} after {', '.join(WAKE_GREETINGS)}")
     print(f"    AUDIO CHANNEL   = {AUDIO_CHANNEL} of {AUDIO_INPUT_CHANNELS}")
     print(f"    DOA             = {DOA_SOURCE}, flip {'on' if DOA_FLIP_LEFT_RIGHT else 'off'}, offset {DOA_OFFSET_DEG:.0f} deg, poll {DOA_POLL_SEC:.2f}s")
@@ -1494,6 +1665,20 @@ async def main():
     await asyncio.to_thread(transcribe_audio, warm, False)
     print(f"    Warm-up done in {time.monotonic() - t0:.1f}s")
 
+    # Live captions: set up the caption feed BEFORE the mic stream starts calling _audio_callback.
+    # Imported here, after .env is loaded, because live_captions reads its settings at import.
+    global _caption_audio, _live_people
+    caption_task = None
+    if LIVE_CAPTIONS and ELEVENLABS_API_KEY:
+        if not 0 <= CAPTION_AUDIO_CHANNEL < AUDIO_INPUT_CHANNELS:
+            print(f"ERROR: CAPTION_AUDIO_CHANNEL={CAPTION_AUDIO_CHANNEL} must be below "
+                  f"AUDIO_INPUT_CHANNELS={AUDIO_INPUT_CHANNELS}; live captions off")
+        else:
+            import live_captions
+            _live_people = live_captions.People()
+            _caption_audio = live_captions.CaptionAudio(asyncio.get_running_loop())
+            caption_task = asyncio.create_task(_live_caption_loop(live_captions))
+
     try:
         start_audio_stream()
     except Exception as exc:
@@ -1506,6 +1691,8 @@ async def main():
         async with websockets.serve(handle_client, "0.0.0.0", 8765):
             await wake_loop()
     finally:
+        if caption_task:
+            caption_task.cancel()
         stop_audio_stream()
 
 

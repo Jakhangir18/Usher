@@ -21,6 +21,9 @@ jellyfish
 # --- Temple motors (haptics.py, Raspberry Pi only) ---
 gpiozero
 
+# --- ElevenLabs (scribe.py: catch-up in server.py, scribe_test.py; live captions use websockets above) ---
+requests
+
 # --- Direction over USB (doa_reader.py; falls back to the xvf_host binary without it) ---
 pyusb
 
