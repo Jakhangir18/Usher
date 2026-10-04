@@ -68,8 +68,21 @@ missing. Fix before the demo, the server will otherwise look healthy.
   hotspot is slow, the arrow still comes, later.
 - Names: "Hi, I'm Sam" names the speaker at once (local rule); "this is Oliver" and names used in
   address come from Gemini within about 12 s.
-- Known false trigger on the Whisper path: "hey Jake", "hi Jackie", "hey jock" buzz, because
-  "jack" is matched by sound (finding F1 in `01-findings.md`). Avoid those names at the table.
+- **Do not say "Hi, I'm Jax" while wearing it.** The wearer's own introduction counts as the wake
+  phrase (R1 in `01-findings.md`): motors buzz toward the wearer, a catch-up of their own words
+  follows, and a judge's real "Hi Jax" in the next 4.5 s is swallowed. Introduce the persona
+  before putting the headset on, or set `WAKE_MAX_GAP=0` in `.env` (then only "Hello Jax" with
+  nothing in between wakes; "hello there Jax" stops working).
+- Known false triggers on the Whisper path: "hey Jake", "hi Jackie", "hey jock" and a plain "Hey
+  Jack" buzz, because "jack" is an accepted spelling and is also matched by sound (F1, R6). Avoid
+  those names at the table, or remove `jack` from `WAKE_EXTRA_NAMES` in `.env` (Whisper then
+  misses the phrase when it hears "jack"; the ElevenLabs path still catches "Jax").
+- If live captions vanish from the OLED while the terminal keeps printing `caption ...` lines,
+  the caption session reconnected (R2): restart `server.py`.
+- Voice-ID lines in the web app stop after about 4-7 minutes of conversation per server run
+  (`REFINE_BUDGET_SEC`, R4), and a page reload after that sticks the page in "identifying
+  voice..." mode (R3). Restart `server.py` between judge groups, or raise `REFINE_BUDGET_SEC`
+  and watch the balance.
 - The web page's **Try demo** button runs a scripted conversation with no hardware. It is the plan B
   if the Pi dies at the table; have a phone video of a real run as well.
 

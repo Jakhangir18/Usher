@@ -72,7 +72,15 @@ The one fixable lint today is `server.py:368` (an f-string without placeholders)
 - `.env.example` and `CLAUDE.md` both document every setting; keep one (the example file) and
   link to it.
 
-## 8. Product and robustness ideas the code is already shaped for
+## 8. Small correctness items from the reviewers (low severity, see `01-findings.md`)
+
+R7 (final-path wake direction), R8 (`pending` after a throttled commit), R9 (unfiltered direction
+fallback), R10 (slow catch-up over a newer arrow), R11 ("?" sentinel), R12 (stale switch
+candidate), R13 and R14 (web app people count, demo timers), R15 (`/state` mirror). Each has a
+one-paragraph fix there. R4 wants a design change: a per-minute rate limit for voice-ID requests
+that pauses and resumes, instead of a one-way spending stop per server run.
+
+## 9. Product and robustness ideas the code is already shaped for
 
 - **Head tracking (IMU)**: `haptics.guide(track=...)` already takes a callable; an IMU heading
   source drops in without changing the buzz logic.

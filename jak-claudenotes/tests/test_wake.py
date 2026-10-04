@@ -89,3 +89,15 @@ def test_caption_wake_final_piece_never_double_buzzes(quiet_outputs):
     assert server._caption_wake("hello jax", "?") is True          # live guess fires
     assert server._caption_wake("hello jax", "?", final=True) is True  # finished piece: no second buzz
     assert len([c for c in quiet_outputs if c[0] == "guide"]) == 1
+
+
+@pytest.mark.xfail(strict=True, reason="Finding R1: the wearer's own 'Hi, I'm Jax' / 'Hey, it's Jax' counts as the wake phrase")
+@pytest.mark.parametrize("text", ["Hi, I'm Jax", "Hey, it's Jax"])  # "hello, I am Jax" is safe: two words between
+def test_the_wearer_introducing_themselves_does_not_wake(text):
+    assert not server.wake_phrase_detected(text, extra_names=False)
+
+
+def test_whisper_path_still_accepts_plain_jack_while_captions_run():
+    """Documents R6: 'Hey Jack' to a real Jack buzzes through Whisper even though the caption path ignores it."""
+    assert server.wake_phrase_detected("hey jack")
+    assert not server.wake_phrase_detected("hey jack", extra_names=False)
