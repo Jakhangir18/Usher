@@ -1,0 +1,26 @@
+[hidden]{display:none!important}
+main{max-width:1440px}
+.intro{margin-top:36px;margin-bottom:28px}
+h1{font-size:38px}
+.listening{grid-template-columns:minmax(0,1fr) minmax(0,1fr);min-height:480px}
+.camera-panel{padding:24px;background:#e8eddf;display:flex;flex-direction:column;min-width:0}
+.live-panel{padding:24px;display:flex;flex-direction:column;min-width:0;border-left:1px solid var(--line)}
+.camera-panel .eyebrow,.live-panel .eyebrow{margin:0}
+.camera-stage{position:relative;flex:1;min-height:325px;margin-top:20px;border-radius:10px;overflow:hidden;background:#d1d8c9}
+#camera-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;text-align:center;padding:24px}
+#camera-empty h2{font-size:23px}#camera-empty p{font-size:13px;line-height:1.6;max-width:250px;color:#4c5c49}.camera-icon{font-size:38px;margin-bottom:15px}
+#camera-stream{width:100%;height:100%;position:absolute;inset:0;object-fit:contain;background:#15221c}
+.camera-footer{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:11px;color:#51604c;padding-top:14px}
+#live-lines{height:365px;overflow-y:auto;margin:14px -8px 16px;padding:0 8px;scrollbar-width:thin;overflow-wrap:anywhere}
+.live-empty{padding:65px 20px;text-align:center;color:var(--muted);line-height:1.7;font-size:14px}.live-empty h2{color:var(--ink);font-size:22px}
+.live-line{border-left:3px solid var(--speaker-color);padding:0 0 0 14px;margin:23px 0}.speaker-tag{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.5px;color:var(--speaker-color);border:1px solid currentColor;border-radius:5px;padding:4px 7px}
+.live-line p{font-size:21px;line-height:1.55;margin:10px 0 0;letter-spacing:-.2px}.line-state{font-size:10px;color:var(--muted)}.partial p:after{content:'▏';color:var(--speaker-color);animation:cursor 1s step-end infinite}.speaker-footer{align-items:center;padding-top:12px;border-top:1px solid var(--line)}
+.entry{border-left:3px solid var(--speaker-color);padding-left:14px;margin-top:12px}.entry .avatar{color:var(--speaker-color);border:1px solid currentColor;background:transparent}.entry-head strong{color:var(--speaker-color)}.entry-direction:empty{display:none}
+.large-text .live-line p{font-size:28px}
+#camera-demo{position:absolute;inset:0;background:linear-gradient(180deg,#c5cabb 0%,#d6d6bf 68%,#aaa997 68%);overflow:hidden}
+.scene-window{position:absolute;left:7%;top:9%;width:29%;height:40%;border:7px solid #f1f1df;background:linear-gradient(145deg,#b1c9cd,#e7ebcf);box-shadow:0 3px 8px #263d3020}.scene-window:after{content:'';position:absolute;left:50%;height:100%;border-left:4px solid #f1f1df}.scene-board{position:absolute;right:10%;top:12%;height:25%;width:28%;border:6px solid #947d61;background:#6f8476}
+.scene-table{position:absolute;bottom:-11%;left:-10%;width:120%;height:33%;background:#b8a082;transform:perspective(300px) rotateX(30deg);z-index:3;border-top:8px solid #cab699}
+.person{position:absolute;bottom:17%;width:32%;height:65%;filter:drop-shadow(0 4px 5px #24382d22)}.person-one{left:13%;--person:#305eab;--shirt:#546e82}.person-two{right:10%;--person:#985118;--shirt:#977761}.head{position:absolute;width:49%;height:35%;left:25%;top:8%;background:#be936f;border-radius:48% 48% 43% 43%;border-top:17px solid #403931}.person-two .head{background:#946949;border-top:20px solid #332d2b}.torso{position:absolute;bottom:0;height:59%;width:100%;border-radius:45% 45% 5% 5%;background:var(--shirt)}.scene-tag{position:absolute;top:-10px;left:50%;transform:translateX(-50%);background:#fffdf4;color:var(--person);font-size:11px;font-weight:bold;padding:7px 12px;border-radius:5px;white-space:nowrap;border:2px solid transparent}.speaking-one .person-one .scene-tag,.speaking-two .person-two .scene-tag{border-color:var(--person);box-shadow:0 0 0 4px #ffffff55}.scene-label{position:absolute;bottom:10px;left:0;right:0;text-align:center;z-index:4;font-size:8px;letter-spacing:1px;color:#26392d;background:#f7f5e5d9;padding:7px}
+@keyframes cursor{50%{opacity:0}}
+@media(prefers-reduced-motion:reduce){.partial p:after{animation:none}}
+@media(max-width:760px){.listening{grid-template-columns:1fr}.live-panel{border-left:0;border-top:1px solid var(--line)}.camera-stage{min-height:290px}#live-lines{height:330px}.intro h1{font-size:30px}.camera-panel,.live-panel{padding:18px}.camera-footer{font-size:10px}.intro{gap:12px}.entry{grid-template-columns:32px 1fr}.live-line p{font-size:20px}}

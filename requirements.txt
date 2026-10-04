@@ -1,33 +1,62 @@
-# Install on the Pi into a venv that can see the system packages (gpiozero/lgpio come from Pi OS):
-#   python3 -m venv --system-site-packages .venv && source .venv/bin/activate && pip install -r requirements.txt
-# System packages: sudo apt install -y libportaudio2 python3-lgpio
-
-# --- Core server (server.py) ---
-sounddevice
-numpy
-websockets
-
-# --- HTTP + static HUD (Flask app: /state) ---
-flask
-Flask-CORS
-
-# --- Speech pipeline ---
-# >=1.0 for temperature/max_new_tokens/without_timestamps in transcribe().
-faster-whisper>=1.0
-jellyfish
-# torch is optional: only needed if USE_SILERO_VAD=1 (off by default).
-#   pip install torch --index-url https://download.pytorch.org/whl/cpu
-
-# --- Temple motors (haptics.py, Raspberry Pi only) ---
-gpiozero
-
-# --- ElevenLabs (scribe.py: catch-up in server.py, scribe_test.py; live captions use websockets above) ---
-requests
-
-# --- Direction over USB (doa_reader.py; falls back to the xvf_host binary without it) ---
-pyusb
-
-# --- OLED display (display_cue.py, Raspberry Pi only) ---
-adafruit-circuitpython-ssd1306
-adafruit-blinka
-Pillow
+Adafruit-Blinka==9.2.0
+Adafruit-Blinka-Raspberry-Pi5-Neopixel==1.0.0rc2
+adafruit-circuitpython-busdevice==5.2.17
+adafruit-circuitpython-connectionmanager==3.1.8
+adafruit-circuitpython-framebuf==1.6.12
+adafruit-circuitpython-requests==4.1.17
+adafruit-circuitpython-ssd1306==2.12.24
+adafruit-circuitpython-typing==1.12.3
+Adafruit-PlatformDetect==3.89.1
+Adafruit_PureIO==1.1.12
+anyio==4.15.1
+av==19.0.1
+binho-host-adapter==0.1.6
+blinker==1.9.0
+certifi==2026.7.22
+cffi==2.1.1
+charset-normalizer==3.5.2
+click==8.5.0
+colorzero==2.0
+ctranslate2==4.8.2
+faster-whisper==1.2.1
+filelock==4.0.10
+Flask==3.1.3
+flask-cors==6.0.5
+flatbuffers==25.12.19
+fsspec==2026.9.0
+gpiozero==2.0.1.post3
+h11==0.16.0
+hf-xet==1.6.0
+httpcore==1.0.9
+httpx==0.28.1
+huggingface_hub==1.33.0
+idna==3.20
+importlib_resources==7.1.0
+itsdangerous==2.2.0
+jellyfish==1.2.1
+Jinja2==3.1.6
+lgpio==0.2.2.0
+libusb-package==1.0.30.0
+MarkupSafe==3.0.4
+numpy==2.5.3
+onnxruntime==1.30.0
+packaging==26.3
+pillow==12.3.0
+protobuf==7.36.2
+pycparser==3.0
+pyftdi==0.57.2
+pyserial==3.5
+pyusb==1.3.1
+PyYAML==6.0.3
+requests==2.34.2
+RPi.GPIO==0.7.1
+rpi_ws281x==5.0.0
+setuptools==84.0.0
+sounddevice==0.5.6
+sysv_ipc==1.2.0
+tokenizers==0.23.2
+tqdm==4.70.1
+typing_extensions==4.16.0
+urllib3==2.8.0
+websockets==17.2
+Werkzeug==3.1.9
